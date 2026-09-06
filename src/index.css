@@ -1,0 +1,592 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+@import url('https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "Fira Code", monospace;
+}
+
+/* Custom Scrollbars */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.45);
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(249, 115, 22, 0.35);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(249, 115, 22, 0.65);
+}
+
+/* HIGH FIDELITY WP DOCUMENT CONTENT STYLING CSS RESET - APA 7TH EDITION DEFAULT */
+.wp-document-content {
+  font-family: "Times New Roman", Times, Georgia, serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  box-sizing: border-box;
+  color: #000000;
+  line-height: 200%;
+}
+
+.wp-document-content h1 {
+  font-family: "Times New Roman", Times, Georgia, serif;
+  font-size: 16px;
+  font-weight: bold;
+  color: #000000;
+  text-transform: none;
+  text-align: center; /* APA 7 Level 1 */
+  letter-spacing: -0.01em;
+  text-indent: 0px !important;
+  margin-top: 0px;
+  margin-bottom: 0px;
+  line-height: 200%;
+  padding-bottom: 0;
+  border-bottom: 0px none transparent !important;
+  border-width: 0px !important;
+  border-style: none !important;
+  position: relative;
+}
+
+/* Disabled orange accent marker for H1 in APA 7 */
+.wp-document-content h1::after {
+  display: none !important;
+  content: none !important;
+}
+
+.wp-document-content h1:first-of-type {
+  margin-top: 0;
+}
+
+.wp-document-content h2 {
+  font-family: "Times New Roman", Times, Georgia, serif;
+  font-size: 16px;
+  font-weight: bold;
+  color: #000000;
+  text-align: left; /* APA 7 Level 2 */
+  text-indent: 0px !important;
+  margin-top: 0px;
+  margin-bottom: 0px;
+  line-height: 200%;
+  letter-spacing: -0.01em;
+}
+
+.wp-document-content h3 {
+  font-family: "Times New Roman", Times, Georgia, serif;
+  font-size: 16px;
+  font-weight: bold;
+  font-style: italic; /* APA 7 Level 3 */
+  color: #000000;
+  text-align: left;
+  text-indent: 0px !important;
+  margin-top: 0px;
+  margin-bottom: 0px;
+  line-height: 200%;
+}
+
+.wp-document-content h4 {
+  font-family: "Times New Roman", Times, Georgia, serif;
+  font-size: 16px;
+  font-weight: bold;
+  color: #000000;
+  text-align: left;
+  text-indent: 0.5in; /* APA 7 Level 4 (Indented, bold, run-in) */
+  margin-top: 0px;
+  margin-bottom: 0px;
+  line-height: 200%;
+}
+
+.wp-document-content h5 {
+  font-family: "Times New Roman", Times, Georgia, serif;
+  font-size: 16px;
+  font-weight: bold;
+  font-style: italic; /* APA 7 Level 5 (Indented, bold italic, run-in) */
+  color: #000000;
+  text-align: left;
+  text-indent: 0.5in;
+  margin-top: 0px;
+  margin-bottom: 0px;
+  line-height: 200%;
+}
+
+/* APA 7 Run-in (inline) Headings */
+.wp-document-content .apa-runin {
+  display: inline !important;
+  font-family: "Times New Roman", Times, Georgia, serif !important;
+  font-size: 16px !important;
+  color: #000000 !important;
+  line-height: 1.8 !important;
+}
+
+.wp-document-content .apa-runin.apa-level1 {
+  font-weight: bold !important;
+}
+
+.wp-document-content .apa-runin.apa-level2 {
+  font-weight: bold !important;
+}
+
+.wp-document-content .apa-runin.apa-level3 {
+  font-weight: bold !important;
+  font-style: italic !important;
+}
+
+.wp-document-content .apa-runin.apa-level4 {
+  font-weight: bold !important;
+  padding-left: 0px !important;
+}
+
+.wp-document-content .apa-runin.apa-level5 {
+  font-weight: bold !important;
+  font-style: italic !important;
+  padding-left: 0px !important;
+}
+
+.wp-document-content p {
+  font-size: 16px !important;
+  line-height: 200% !important;
+  color: #000000 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0px !important;
+  text-align: left !important; /* APA 7 standard prefers left alignment (ragged right) */
+  text-indent: 0.5in !important; /* Sangría de primera línea APA 7 */
+  border: 0px none transparent !important;
+  border-width: 0px !important;
+  border-style: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Explicit border resets to prevent unwanted frames while preserving KaTeX math lines, tables and the TOC leader dots */
+.wp-document-content *:not(.katex):not(.katex *):not(table):not(thead):not(tbody):not(tr):not(th):not(td):not(figure):not(.note):not(hr):not(.toc-dots),
+.wp-document-content *::before,
+.wp-document-content *::after,
+.wp-template-content *:not(.katex):not(.katex *):not(table):not(thead):not(tbody):not(tr):not(th):not(td):not(figure):not(.note):not(hr):not(.toc-dots),
+.wp-template-content *::before,
+.wp-template-content *::after,
+.document-rendered-container *:not(.katex):not(.katex *):not(table):not(thead):not(tbody):not(tr):not(th):not(td):not(figure):not(.note):not(hr):not(.toc-dots),
+.continuous-page-boundary {
+  border: 0px none transparent !important;
+  border-width: 0px !important;
+  border-style: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Explicit KaTeX Fraction & Math Line Preservation */
+.katex .frac-line,
+.wp-document-content .katex .frac-line,
+.wp-template-content .katex .frac-line,
+.document-rendered-container .katex .frac-line {
+  border-bottom-style: solid !important;
+  border-bottom-width: 0.04em !important;
+  border-bottom-color: currentColor !important;
+  display: inline-block !important;
+}
+
+.katex .sqrt .sqrt-line,
+.wp-document-content .katex .sqrt .sqrt-line,
+.wp-template-content .katex .sqrt .sqrt-line,
+.document-rendered-container .katex .sqrt .sqrt-line {
+  border-bottom-style: solid !important;
+  border-bottom-width: 0.04em !important;
+  border-bottom-color: currentColor !important;
+}
+
+.katex .overline .overline-line,
+.wp-document-content .katex .overline .overline-line,
+.wp-template-content .katex .overline .overline-line,
+.document-rendered-container .katex .overline .overline-line {
+  border-bottom-style: solid !important;
+  border-bottom-width: 0.04em !important;
+  border-bottom-color: currentColor !important;
+}
+
+.katex .underline .underline-line,
+.wp-document-content .katex .underline .underline-line,
+.wp-template-content .katex .underline .underline-line,
+.document-rendered-container .katex .underline .underline-line {
+  border-top-style: solid !important;
+  border-top-width: 0.04em !important;
+  border-top-color: currentColor !important;
+}
+
+/* Lists styling - APA 7 clean margins & standard bullets */
+.wp-document-content ul:not(.toc-list),
+.wp-document-content ol {
+  padding-left: 24px !important;
+  margin-bottom: 12px;
+  text-indent: 0px !important;
+}
+
+.wp-document-content ul:not(.toc-list) {
+  list-style-type: disc;
+}
+
+.wp-document-content ul:not(.toc-list) li {
+  font-size: 16px;
+  line-height: 1.8;
+  color: #000000;
+  margin-bottom: 6px;
+  position: relative;
+  text-indent: 0px !important;
+  padding-left: 0px !important;
+}
+
+.wp-document-content ul:not(.toc-list) li::before {
+  content: none; /* Remove orange bullet squares without preventing user override */
+}
+
+.wp-document-content ol {
+  list-style-type: decimal;
+}
+
+.wp-document-content ol li {
+  font-size: 16px;
+  line-height: 1.8;
+  color: #000000;
+  margin-bottom: 6px;
+  text-indent: 0px !important;
+  padding-left: 0px !important;
+}
+
+/* Evitar que párrafos internos de listas hereden indentación de texto o hagan saltos de línea */
+.wp-document-content ul:not(.toc-list) li p,
+.wp-document-content ul:not(.toc-list) li span:not(.katex):not(.katex *),
+.wp-document-content ul:not(.toc-list) li div:not(.katex):not(.katex *),
+.wp-document-content ol li p,
+.wp-document-content ol li span:not(.katex):not(.katex *),
+.wp-document-content ol li div:not(.katex):not(.katex *),
+.wp-document-content figure p,
+.wp-document-content figcaption,
+.wp-document-content .note p,
+.wp-document-content table p {
+  text-indent: 0px !important;
+  margin: 0 !important;
+  display: inline !important;
+}
+
+/* Custom list-style color for ordered lists - neutral for APA */
+.wp-document-content ol::marker {
+  color: #000000;
+  font-weight: normal;
+}
+
+/* Academic Blockquotes - APA 7 style (Indented 0.5in, double spaced, no background/border colors) */
+.wp-document-content blockquote {
+  border-left: none;
+  background-color: transparent;
+  padding: 0;
+  margin: 12px 0 12px 0.5in;
+  font-style: normal; /* APA 7 blockquotes are not italic by default */
+  font-size: 16px;
+  line-height: 1.8;
+  color: #000000;
+  border-radius: 0;
+}
+
+.wp-document-content blockquote cite {
+  display: block;
+  font-style: normal;
+  font-weight: normal;
+  font-size: 11px;
+  color: #000000;
+  margin-top: 6px;
+  text-align: right;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* Highlight Note Box - APA 7 minimal style (No heavy blue borders/backgrounds) */
+.wp-document-content .note {
+  border-left: 3px solid #000000;
+  background-color: #f8fafc;
+  padding: 12px 14px;
+  margin: 16px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #000000;
+  border-radius: 0 4px 4px 0;
+}
+
+.wp-document-content .note strong {
+  color: #000000;
+  font-weight: 700;
+}
+
+/* Figure and academic Thumbnail/Image formatting */
+.wp-document-content figure {
+  display: block;
+  margin: 16px auto;
+  border: 1px solid #e2e8f0;
+  background-color: #f8fafc;
+  padding: 8px;
+  border-radius: 4px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.wp-document-content figure.mw-default-size,
+.wp-document-content figure[class*="thumb"] {
+  float: right;
+  margin-left: 18px;
+  margin-top: 4px;
+  margin-bottom: 12px;
+  width: 220px;
+}
+
+.wp-document-content figcaption {
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  color: #64748b;
+  margin-top: 8px;
+  line-height: 1.4;
+  text-align: center;
+  font-style: italic;
+}
+
+.wp-document-content img,
+.wp-document-content .mw-file-element {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+  border-radius: 2px;
+}
+
+/* Table of Contents Academic Style */
+.toc-container {
+  margin: 0;
+  padding: 0;
+}
+
+.toc-header {
+  font-family: var(--font-sans);
+  margin-top: 0;
+  margin-bottom: 24px;
+  font-size: 16px;
+  font-weight: bold;
+  text-align: center;
+}
+
+.toc-list {
+  list-style-type: none;
+  padding-left: 0;
+  margin: 0;
+}
+
+.toc-item {
+  display: flex;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.toc-item::before {
+  content: none;
+}
+
+.toc-title {
+  white-space: nowrap;
+}
+
+.toc-container .toc-dots,
+.toc-item .toc-dots {
+  flex-grow: 1;
+  border-bottom: 1px dotted black !important;
+  margin: 0 8px;
+}
+
+.toc-page {
+  font-weight: bold;
+}
+
+/* Manual Page Break element */
+.page-break {
+  page-break-after: always !important;
+  break-after: page !important;
+  height: 0px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  display: block;
+}
+
+/* Clear floats after sections to avoid layouts drifting into headers/footers */
+.wp-document-body::after,
+.wp-document-content::after {
+  content: "";
+  display: table;
+  clear: both;
+}
+
+/* Margin Elements Image Stretch Rules */
+.wp-margin-element img {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: fill !important;
+}
+
+/* PRINT MEDIA OVERLAY FORMAT AND HIGH RESOLUTION COLOR STYLING */
+@media print {
+  /* Hide all UI containers */
+  body, html {
+    background-color: #ffffff !important;
+    background-image: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    overflow: visible !important;
+  }
+
+  .print\:hidden {
+    display: none !important;
+  }
+
+  /* Expand print nodes */
+  #root {
+    display: block !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background-color: white !important;
+  }
+
+  /* Outer page wrappers do not show background box-shadows or border outlines */
+  div[name^="document-page-"] {
+    position: relative !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    box-sizing: border-box !important;
+    background-color: white !important;
+    
+    /* Strict CSS Page Breakers */
+    page-break-after: always !important;
+    break-after: page !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    
+    /* Ensure high fidelity rendering */
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .print-page-boundary {
+    margin: 0px !important;
+    padding: 0px !important;
+  }
+
+  div[name^="document-page-"]:last-of-type {
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+  }
+
+  #wp-cover-page {
+    position: relative !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 0 !important; /* Cover page is full bleed */
+    width: 100% !important;
+    max-width: none !important;
+    box-sizing: border-box !important;
+    background-color: white !important;
+    
+    /* Strict CSS Page Breakers */
+    page-break-after: always !important;
+    break-after: page !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    
+    /* Ensure high fidelity rendering */
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Specific Paper dimension overrides in browser driver */
+  @page {
+    margin: 0 !important;
+    size: auto; /* Uses Letter or A4 based on print dialog */
+  }
+}
+
+/* Ensure monospace and code blocks are never indented by default paragraph rules */
+.wp-document-content pre,
+.wp-document-content pre *,
+.wp-document-content code,
+.wp-document-content code * {
+  text-indent: 0px !important;
+}
+
+/* Colored Markdown Editor Tokens and Overlay Alignment */
+.colored-markdown-backdrop,
+.colored-markdown-textarea {
+  tab-size: 2 !important;
+  -moz-tab-size: 2 !important;
+  font-family: "Fira Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+  font-variant-ligatures: none !important;
+  font-feature-settings: "liga" 0, "calt" 0 !important;
+  font-synthesis: none !important;
+  letter-spacing: 0px !important;
+  line-height: 1.6 !important;
+  font-size: 12px !important;
+  box-sizing: border-box !important;
+}
+
+.colored-markdown-backdrop * {
+  font-family: inherit !important;
+  letter-spacing: inherit !important;
+  font-synthesis: none !important;
+}
+
+/* Highlight styling for mark elements inside document content */
+.wp-document-content mark {
+  padding: 0 4px;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.md-token-colored-text {
+  display: inline;
+}
+
+/* VS Code / Monaco style Red Wavy Underline for Syntax Errors without layout-shifting padding or borders */
+.syntax-error-token {
+  text-decoration: underline wavy #ef4444 2px !important;
+  text-decoration-skip-ink: none !important;
+  background-color: rgba(239, 68, 68, 0.25) !important;
+  color: #fca5a5 !important;
+  cursor: help;
+  display: inline;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+}
+
+.syntax-error-token:hover {
+  background-color: rgba(239, 68, 68, 0.45) !important;
+}
+
+.syntax-warning-token {
+  text-decoration: underline wavy #f59e0b 2px !important;
+  text-decoration-skip-ink: none !important;
+  background-color: rgba(245, 158, 11, 0.2) !important;
+  color: #fde68a !important;
+  cursor: help;
+  display: inline;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+}
+
