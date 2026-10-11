@@ -367,6 +367,14 @@
   padding: 0;
 }
 
+.mdwp-toc-engine-slot {
+  display: contents;
+}
+
+.mdwp-toc-inline-slot {
+  display: contents;
+}
+
 .toc-header {
   font-family: var(--font-sans);
   margin-top: 0;

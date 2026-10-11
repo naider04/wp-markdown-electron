@@ -9,7 +9,7 @@ export function parseBibtex(bibtex: string): BibliographyItem[] {
   const items: BibliographyItem[] = [];
   
   // Normalize and split by entries starting with @
-  const rawEntries = bibtex.split(/(?=@)/);
+  const rawEntries = bibtex.split(/(?=^@)/m);
   
   for (let entry of rawEntries) {
     entry = entry.trim();

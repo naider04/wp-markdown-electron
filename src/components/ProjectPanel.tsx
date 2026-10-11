@@ -2,7 +2,6 @@ import React from 'react';
 import {
   FolderOpen,
   FileText,
-  BookOpen,
   Save,
   Eye,
   EyeOff,
@@ -16,11 +15,9 @@ interface ProjectPanelProps {
   projectFolder: string | null;
   contentPath: string | null;
   contentText: string;
-  bibPath: string | null;
   showContentInPreview: boolean;
   onPickFolder: () => void;
   onPickFile: () => void;
-  onPickBib: () => void;
   onToggleShowContent: () => void;
   onSaveProject: () => void;
   onLoadContentText: (text: string) => void;
@@ -34,11 +31,9 @@ export function ProjectPanel({
   projectFolder,
   contentPath,
   contentText,
-  bibPath,
   showContentInPreview,
   onPickFolder,
   onPickFile,
-  onPickBib,
   onToggleShowContent,
   onSaveProject,
   toastMsg,
@@ -51,7 +46,6 @@ export function ProjectPanel({
 
   const fileName = contentPath ? contentPath.split(/[\\/]/).pop() : null;
   const contentChars = contentText ? contentText.length : 0;
-  const bibFileName = bibPath ? bibPath.split(/[\\/]/).pop() : null;
 
   return (
     <div className="flex flex-col h-full bg-slate-900 text-slate-200 overflow-y-auto">
@@ -118,35 +112,6 @@ export function ProjectPanel({
               {es ? 'Primero elige una carpeta de proyecto.' : 'Choose a project folder first.'}
             </p>
           )}
-        </div>
-
-        {/* Bibliography (.bib) file */}
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[9.5px] font-bold uppercase tracking-wider text-slate-400">
-            {es ? 'Archivo de bibliografía (.bib)' : 'Bibliography file (.bib)'}
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={onPickBib}
-              disabled={!projectFolder}
-              className={`flex-1 flex items-center gap-2 p-2.5 rounded bg-slate-950 border border-slate-800 text-left min-w-0 transition-all ${
-                projectFolder
-                  ? 'hover:border-[#FF6600]/60 cursor-pointer'
-                  : 'opacity-40 cursor-not-allowed'
-              }`}
-              title={bibFileName || (es ? 'Elegir archivo de bibliografía' : 'Choose bibliography file')}
-            >
-              <BookOpen className="w-4 h-4 text-amber-400 shrink-0" />
-              <span className="text-[11px] truncate text-slate-300">
-                {bibFileName || (es ? 'Elegir archivo (.bib)…' : 'Choose file (.bib)…')}
-              </span>
-            </button>
-          </div>
-          <p className="text-[9px] text-slate-500 leading-snug">
-            {es
-              ? 'Se guarda como bibliografia.bib y se muestra en la vista previa.'
-              : 'Saved as bibliografia.bib and shown in the preview.'}
-          </p>
         </div>
 
         {/* Show content toggle */}
@@ -218,9 +183,9 @@ export function ProjectPanel({
             {es ? '¿Qué guarda?' : 'What gets saved?'}
           </span>
           {es ? (
-            <p>Cada vez que pulses Guardar se escribe <code className="text-sky-300">configuracion_metadatos.json</code> y la bibliografía en la carpeta del proyecto. El archivo <code className="text-sky-300">contenido_fuente.qmd</code> se edita externamente y no se toca.</p>
+            <p>Cada vez que pulses Guardar se escribe <code className="text-sky-300">.mdwp/configuracion_metadatos.json</code> y la bibliografía en la carpeta del proyecto. El archivo <code className="text-sky-300">contenido_fuente.md</code> se edita externamente y no se toca.</p>
           ) : (
-            <p>Whenever you press Save, <code className="text-sky-300">configuracion_metadatos.json</code> and the bibliography are written to the project folder. <code className="text-sky-300">contenido_fuente.qmd</code> is edited externally and is never modified.</p>
+            <p>Whenever you press Save, <code className="text-sky-300">.mdwp/configuracion_metadatos.json</code> and the bibliography are written to the project folder. <code className="text-sky-300">contenido_fuente.md</code> is edited externally and is never modified.</p>
           )}
         </div>
       </div>

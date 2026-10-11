@@ -32,8 +32,9 @@ function markerFor(key: string): string {
   return `/* ==== WP-SECCION:${key} ==== */`;
 }
 
-// Parse a styles file into { [settingsField]: cssBody }. Sections without a
-// marker are ignored; markers without content are skipped.
+// Parse a styles file into { [settingsField]: cssBody }. The marker id is the
+// stable on-disk name (for example `css-adicional`), while the renderer reads
+// settings fields (for example `customAddedCss`), so translate between them.
 export function parseStylesFile(text: string): Partial<Record<string, string>> {
   const out: Partial<Record<string, string>> = {};
   if (!text) return out;
@@ -49,7 +50,8 @@ export function parseStylesFile(text: string): Partial<Record<string, string>> {
     const { key, commentEnd } = matches[i];
     const nextStart = i + 1 < matches.length ? matches[i + 1].start : text.length;
     const body = text.slice(commentEnd, nextStart).trim();
-    if (body) out[key] = body;
+    const section = STYLES_SECTIONS.find((candidate) => candidate.key === key);
+    if (body && section) out[section.field] = body;
   }
   return out;
 }

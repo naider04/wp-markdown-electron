@@ -197,22 +197,40 @@ export function preprocessMarkdownColors(src: string): string {
   return result;
 }
 
-export const markdownParser = new Marked({
-  gfm: true,
-  breaks: true,
-  hooks: {
-    preprocess(markdown: string) {
-      return preprocessMarkdownColors(stripYamlFrontMatter(convertQuartoFencedDivs(markdown || '')));
+// `breaks` decides whether a single newline inside a paragraph is rendered as a
+// <br> or reflowed as a space. Standard Markdown (CommonMark/GFM) says a
+// newline inside a paragraph is a soft break and must be reflowed; only an
+// explicit hard break (two trailing spaces or a backslash) emits a <br>.
+// Document sources are hard-wrapped for readability, so turning this on
+// shatters every paragraph at the wrap column.
+function createParser(breaks: boolean): Marked {
+  return new Marked({
+    gfm: true,
+    breaks,
+    hooks: {
+      preprocess(markdown: string) {
+        return preprocessMarkdownColors(stripYamlFrontMatter(convertQuartoFencedDivs(markdown || '')));
+      }
     }
-  }
-});
+  });
+}
+
+// Body content: paragraphs are hard-wrapped, so soft breaks must reflow.
+export const markdownParser = createParser(false);
+
+// Cover overlay: authored as one short line per field, so each line is a
+// distinct entry and must stay on its own line.
+export const coverParser = createParser(true);
 
 // Configure custom renderer for code syntax highlighting and APA headings
-markdownParser.use({
+const customRenderers = {
   renderer: {
     code(token: any): string {
       const lang = (token.lang || '').trim();
       const text = token.text || '';
+      if (lang.toLowerCase() === 'mermaid') {
+        return `<div class="mermaid">${text}</div>`;
+      }
       const highlighted = highlightCode(text, lang);
       return `<pre class="language-${lang}"><code class="language-${lang}">${highlighted}</code></pre>`;
     },
@@ -253,7 +271,10 @@ markdownParser.use({
       }
     }
   }
-});
+};
+
+markdownParser.use(customRenderers as any);
+coverParser.use(customRenderers as any);
 
 export function extractCoverCss(tmpl: string): string {
   if (!tmpl) return '';
@@ -267,7 +288,7 @@ export function extractCoverCss(tmpl: string): string {
 }
 
 export function compileCoverHtml(cssOrTemplate: string, markdown: string): string {
-  const compiledMarkdown = String(markdownParser.parse(markdown || ''));
+  const compiledMarkdown = String(coverParser.parse(markdown || ''));
   const raw = (cssOrTemplate || '').trim();
 
   if (raw.includes('{{content}}')) {
@@ -277,4 +298,13 @@ export function compileCoverHtml(cssOrTemplate: string, markdown: string): strin
   let cleanCss = raw.replace(/^<style[^>]*>/i, '').replace(/<\/style>$/i, '').trim();
 
   return `<style>\n${cleanCss}\n</style>\n<div class="cv-page">\n    <div class="cv-content">\n        ${compiledMarkdown}\n    </div>\n</div>`;
+}
+
+export function parseCoverSource(source: string): { css: string; markdown: string } {
+  const cssMatch = source.match(/<!-- mdwp:cover-css -->([\s\S]*?)<!-- \/mdwp:cover-css -->/i);
+  const markdownMatch = source.match(/<!-- mdwp:cover-markdown -->([\s\S]*?)(?:<!-- \/mdwp:cover-markdown -->|$)/i);
+  return {
+    css: cssMatch ? cssMatch[1].trim() : '',
+    markdown: markdownMatch ? markdownMatch[1].trim() : source.trim(),
+  };
 }

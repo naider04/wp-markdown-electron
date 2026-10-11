@@ -69,11 +69,90 @@ function yieldToMain(): Promise<void> {
   });
 }
 
+// During `mdwp build` the app is served under /app/, so relative image paths
+// like evidencias/foo.png resolve to /app/evidencias/... and 404. Point them
+// at the project data server root instead so measurement sees real heights.
+function getCompileServerBase(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const mode = params.get('mode');
+    if (mode !== 'build' && mode !== 'pdf') return null;
+    const server = params.get('server');
+    return server ? server.replace(/\/$/, '') : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveMeasureImageSrc(src: string, serverBase: string | null): string {
+  if (!src || /^(?:https?:|data:|blob:|file:|\/\/)/i.test(src)) return src;
+  if (!serverBase) return src;
+  const cleaned = src.replace(/^\.\//, '').replace(/^\/+/, '');
+  return `${serverBase}/${cleaned.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+function inlineProjectImages(html: string, files: UploadedFile[]): string {
+  if (!html || !files.length) return html;
+  const byName = new Map<string, string>();
+  for (const file of files) {
+    if (!file?.name || !file.dataUrl) continue;
+    const normalized = file.name.replace(/\\/g, '/');
+    byName.set(normalized.toLowerCase(), file.dataUrl);
+    byName.set((normalized.split('/').pop() || normalized).toLowerCase(), file.dataUrl);
+  }
+
+  const resolve = (raw: string): string => {
+    if (!raw || /^(?:https?:|data:|blob:|file:|\/\/|#)/i.test(raw)) return raw;
+    let path = raw.split(/[?#]/, 1)[0].replace(/\\/g, '/').replace(/^\.\//, '');
+    try { path = decodeURIComponent(path); } catch { /* keep the original path */ }
+    return byName.get(path.toLowerCase()) ||
+      byName.get((path.split('/').pop() || path).toLowerCase()) || raw;
+  };
+
+  // srcDoc has an about:srcdoc base URL, so project-relative paths resolve
+  // under the app directory. Embed project images before loading the sandbox.
+  const withSrc = html.replace(/(\bsrc\s*=\s*)(["'])([^"']+)\2/gi, (match, prefix, quote, src) => {
+    const resolved = resolve(src);
+    return resolved === src ? match : `${prefix}${quote}${resolved}${quote}`;
+  });
+  return withSrc.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi, (match, quote, src) => {
+    const resolved = resolve(src.trim());
+    return resolved === src.trim() ? match : `url(${quote}${resolved}${quote})`;
+  });
+}
+
+function waitForContainerImages(container: HTMLElement): Promise<void> {
+  const imgs = Array.from(container.querySelectorAll('img')) as HTMLImageElement[];
+  if (imgs.length === 0) return Promise.resolve();
+  return Promise.all(
+    imgs.map(
+      (img) =>
+        new Promise<void>((resolve) => {
+          if (img.complete) {
+            resolve();
+            return;
+          }
+          const done = () => {
+            img.removeEventListener('load', done);
+            img.removeEventListener('error', done);
+            resolve();
+          };
+          img.addEventListener('load', done);
+          img.addEventListener('error', done);
+        })
+    )
+  ).then(() => undefined);
+}
+
 interface HeadingItem {
   text: string;
   page: number;
   level: number;
   pageRelative?: number;
+  // Manual/hidden TOC entries keep the user-typed absolute page; auto headings
+  // get their page recomputed from pageRelative.
+  isManual?: boolean;
 }
 
 const BASE_TOC_CSS = `
@@ -648,6 +727,78 @@ const toolbarHTML_Preview = `<!-- Floating Academic Toolbar (Omitted when printi
     </button>
   </div>`;
 
+// Mermaid blocks are measured as plain text by the paginator unless we convert
+// them to their rendered SVG first. The raw diagram source collapses to a short
+// paragraph, so the real SVG (much taller) later overflows the page and clips
+// the bottom rows. Ensure the library is loaded and remeasure using the SVG.
+let mermaidReadyPromise: Promise<boolean> | null = null;
+
+function ensureMermaidLoaded(timeoutMs = 10000): Promise<boolean> {
+  if (typeof window === 'undefined') return Promise.resolve(false);
+  const w = window as any;
+  if (w.mermaid) return Promise.resolve(true);
+  if (mermaidReadyPromise) return mermaidReadyPromise;
+  mermaidReadyPromise = new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      mermaidReadyPromise = null;
+      resolve(false);
+    }, timeoutMs);
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+    script.onload = () => {
+      clearTimeout(timer);
+      try {
+        w.mermaid.initialize({ startOnLoad: false, theme: 'default' });
+        resolve(true);
+      } catch (e) {
+        console.error('Mermaid init error:', e);
+        mermaidReadyPromise = null;
+        resolve(false);
+      }
+    };
+    script.onerror = () => {
+      clearTimeout(timer);
+      mermaidReadyPromise = null;
+      resolve(false);
+    };
+    document.body.appendChild(script);
+  });
+  return mermaidReadyPromise;
+}
+
+async function renderMermaidBlocksInText(text: string): Promise<string> {
+  const w = window as any;
+  if (!w || !w.mermaid || !text.includes('<div class="mermaid"')) return text;
+  let counter = 0;
+  const blocks: { from: string; to: string }[] = [];
+  const re = /<div class="mermaid"(?![^>]*data-processed)[^>]*>([\s\S]*?)<\/div>/g;
+  let m;
+  while ((m = re.exec(text))) {
+    let code = m[1].trim();
+    if (!code) continue;
+    code = code
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'");
+    try {
+      const id = `mc${Date.now().toString(36)}${counter++}${Math.random().toString(36).slice(2, 6)}`;
+      const { svg } = await w.mermaid.render(id, code);
+      blocks.push({
+        from: m[0],
+        to: `<div class="mermaid" data-processed="true" style="display:flex;justify-content:center;margin:16px 0;max-width:100%;overflow:visible;">${svg}</div>`,
+      });
+    } catch (e) {
+      console.warn('Mermaid render error:', e);
+    }
+  }
+  if (blocks.length === 0) return text;
+  let out = text;
+  for (const b of blocks) out = out.replace(b.from, () => b.to);
+  return out;
+}
+
 export default function DocumentPreview({
   cover: liveCover,
   settings: liveSettings,
@@ -689,6 +840,9 @@ export default function DocumentPreview({
   const [paginatedTOCPages, setPaginatedTOCPages] = useState<HeadingItem[][]>([]);
   const [zoom, setZoom] = useState<number>(100);
   const [recalculating, setRecalculating] = useState<boolean>(false);
+  useEffect(() => {
+    (window as any).__wpRecalculating = recalculating;
+  }, [recalculating]);
   const [dynamicHeadings, setDynamicHeadings] = useState<HeadingItem[]>([]);
 
   const renderPageHTML = (html: string) => {
@@ -720,6 +874,10 @@ export default function DocumentPreview({
   const [builtHtml, setBuiltHtml] = useState<string>('');
   const [builtHtmlExists, setBuiltHtmlExists] = useState<boolean>(false);
   const [loadingBuiltHtml, setLoadingBuiltHtml] = useState<boolean>(false);
+  const sandboxHtml = React.useMemo(
+    () => inlineProjectImages(builtHtml, activeUploadedFiles),
+    [builtHtml, activeUploadedFiles],
+  );
 
   const handleOpenPreview = async () => {
     if (!bridge || !projectFolder) {
@@ -946,9 +1104,26 @@ export default function DocumentPreview({
     // 2. Resolve image uploads
     if (activeUploadedFiles && activeUploadedFiles.length > 0) {
       activeUploadedFiles.forEach((file) => {
+        if (!file?.name || !file?.dataUrl) return;
         const escapedName = file.name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-        const regex = new RegExp(`src=["'](?:[^"']*/)?${escapedName}["']`, 'gi');
-        selectHtml = selectHtml.replace(regex, `src="${file.dataUrl}"`);
+        // Prefer an exact path match (evidencias/foo.png), then allow a
+        // directory prefix before a basename-only upload name.
+        const exact = new RegExp(`src=["']${escapedName}["']`, 'gi');
+        selectHtml = selectHtml.replace(exact, `src="${file.dataUrl}"`);
+        const baseName = file.name.split(/[\\/]/).pop() || file.name;
+        if (baseName !== file.name) {
+          const escapedBase = baseName.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+          const withPrefix = new RegExp(`src=["'](?:[^"']*/)?${escapedBase}["']`, 'gi');
+          // Only rewrite still-relative refs (skip ones already turned into data:)
+          selectHtml = selectHtml.replace(withPrefix, (full) =>
+            /src=["']data:/i.test(full) ? full : `src="${file.dataUrl}"`
+          );
+        } else {
+          const withPrefix = new RegExp(`src=["'](?:[^"']*/)?${escapedName}["']`, 'gi');
+          selectHtml = selectHtml.replace(withPrefix, (full) =>
+            /src=["']data:/i.test(full) ? full : `src="${file.dataUrl}"`
+          );
+        }
       });
     }
 
@@ -1020,8 +1195,10 @@ export default function DocumentPreview({
     selectHtml = selectHtml.replace(/<p>\s*\[PAGEBREAK\]\s*<\/p>/gi, '<div class="page-break"></div>');
     selectHtml = selectHtml.replace(/\[PAGEBREAK\]/gi, '<div class="page-break"></div>');
 
-    // 3c. Replace manual bibliography [BIBLIOGRAPHY]
-    const hasManualBibliography = selectHtml.includes('[BIBLIOGRAPHY]');
+    // 3c. Replace manual bibliography [BIBLIOGRAPHY] / Quarto refs div (::: {#refs} :::)
+    const hasManualBibliography =
+      selectHtml.includes('[BIBLIOGRAPHY]') ||
+      /<div\s+[^>]*id=["']refs["']/i.test(selectHtml);
     if (hasManualBibliography) {
       let bibItemsToShow = [...activeBibliography];
       if (settings.showOnlyCitedBibliography) {
@@ -1029,13 +1206,8 @@ export default function DocumentPreview({
       }
 
       const sortedBib = bibItemsToShow.sort((a, b) => a.authors.localeCompare(b.authors));
-      const bibTitle = settings.bibliographyTitle || 'Referencias Bibliográficas';
-      
-      let bibHtml = `
-        <h1 class="wp-bibliography-title" style="font-family: 'Times New Roman', Times, serif; font-size: 16px; font-weight: bold; text-align: center; margin-top: 24px; margin-bottom: 24px;">
-          ${bibTitle}
-        </h1>
-      `;
+
+      let bibHtml = ``;
 
       sortedBib.forEach(item => {
         bibHtml += `
@@ -1047,6 +1219,7 @@ export default function DocumentPreview({
 
       selectHtml = selectHtml.replace(/<p>\s*\[BIBLIOGRAPHY\]\s*<\/p>/gi, bibHtml);
       selectHtml = selectHtml.replace(/\[BIBLIOGRAPHY\]/gi, bibHtml);
+      selectHtml = selectHtml.replace(/<div\s+[^>]*id=["']refs["'][^>]*>[\s\S]*?<\/div>/gi, bibHtml);
     }
 
     // 3d. Replace manual Table of Contents [TOC]
@@ -1056,7 +1229,8 @@ export default function DocumentPreview({
       const tempDiv = document.createElement('div');
       tempDiv.innerHTML = selectHtml;
       const headingsForManualTOC: { text: string; level: number }[] = [];
-      const hElements = Array.from(tempDiv.querySelectorAll('h1, h2, h3, h4, h5, .apa-runin'));
+      const selectedTOCLevels = settings.tocLevels ?? [1, 2];
+      const hElements = Array.from(tempDiv.querySelectorAll('h1, h2, h3, h4, h5, h6, .apa-runin'));
       hElements.forEach((h) => {
         let text = h.textContent?.trim() || '';
         if (text) {
@@ -1069,6 +1243,8 @@ export default function DocumentPreview({
               level = parseInt(levelClass.replace('apa-level', ''), 10);
             }
           }
+
+          if (!selectedTOCLevels.includes(level)) return;
 
           // Strip trailing period for TOC
           if (h.classList.contains('apa-runin') && text.endsWith('.')) {
@@ -1084,6 +1260,7 @@ export default function DocumentPreview({
 
       const tocTitle = settings.tocTitle || 'Tabla de Contenidos';
       let manualTocHtml = `
+        <section class="mdwp-toc-inline-slot" data-mdwp-toc-inline="0">
         <div class="toc-container select-text manual-toc">
           <div class="toc-header">${tocTitle}</div>
           <ul class="toc-list">
@@ -1109,10 +1286,13 @@ export default function DocumentPreview({
       manualTocHtml += `
           </ul>
         </div>
+        </section>
       `;
 
-      selectHtml = selectHtml.replace(/<p>\s*\[TOC\]\s*<\/p>/gi, manualTocHtml);
-      selectHtml = selectHtml.replace(/\[TOC\]/gi, manualTocHtml);
+      let manualTocSlot = 0;
+      const nextManualToc = () => manualTocHtml.replace('data-mdwp-toc-inline="0"', `data-mdwp-toc-inline="${manualTocSlot++}"`);
+      selectHtml = selectHtml.replace(/<p>\s*\[TOC\]\s*<\/p>/gi, nextManualToc);
+      selectHtml = selectHtml.replace(/\[TOC\]/gi, nextManualToc);
     }
 
     // 4. Append automatic APA bibliography page at the very end (only if not manually inserted)
@@ -1123,15 +1303,9 @@ export default function DocumentPreview({
       }
 
       const sortedBib = bibItemsToShow.sort((a, b) => a.authors.localeCompare(b.authors));
-      const bibTitle = settings.bibliographyTitle || 'Referencias Bibliográficas';
-      
+
       // We append elements as flat sibling nodes so the paginator can cleanly slice them across pages!
-      let bibHtml = `
-        <div class="page-break"></div>
-        <h1 class="wp-bibliography-title" style="font-family: 'Times New Roman', Times, serif; font-size: 16px; font-weight: bold; text-align: center; margin-top: 24px; margin-bottom: 24px;">
-          ${bibTitle}
-        </h1>
-      `;
+      let bibHtml = `<div class="page-break"></div>`;
 
       sortedBib.forEach(item => {
         bibHtml += `
@@ -1144,8 +1318,11 @@ export default function DocumentPreview({
       selectHtml += bibHtml;
     }
 
-    return selectHtml;
-  }, [activeHtmlContent, activeHtmlBlocks, activeUploadedFiles, activeBibliography, settings.pageSize, settings.showBibliography, settings.bibliographyTitle, settings.showOnlyCitedBibliography, settings.tocTitle, settings.h1LineBreak, settings.h2LineBreak, settings.h3LineBreak, settings.h4LineBreak, settings.h5LineBreak]);
+    // Resolve project-relative Markdown images to the loaded project assets.
+    // This keeps the paginated view independent of the Electron app's own
+    // file:// or /app/ base URL.
+    return inlineProjectImages(selectHtml, activeUploadedFiles);
+  }, [activeHtmlContent, activeHtmlBlocks, activeUploadedFiles, activeBibliography, settings.pageSize, settings.showBibliography, settings.bibliographyTitle, settings.showOnlyCitedBibliography, settings.tocTitle, settings.tocLevels, settings.h1LineBreak, settings.h2LineBreak, settings.h3LineBreak, settings.h4LineBreak, settings.h5LineBreak]);
 
   const resolvedCover = React.useMemo(() => {
     let selectCover = { ...cover };
@@ -1378,10 +1555,18 @@ export default function DocumentPreview({
         setRecalculating(false);
         return;
       }
-      
+
+      // If the document contains mermaid diagrams, wait until the library is
+      // loaded so measureHTMLHeight() can size the fenced blocks from their
+      // rendered SVG instead of the (much shorter) raw diagram source text.
+      if (hiddenMeasureRef.current.querySelector('.mermaid')) {
+        await ensureMermaidLoaded();
+      }
+
       // Select raw rendered children in our hidden container
       const childNodes = Array.from(hiddenMeasureRef.current.children) as HTMLElement[];
       let detectedHeadings: HeadingItem[] = [];
+      const selectedTOCLevels = settings.tocLevels ?? [1, 2];
 
       if (settings.pageSize === 'continuous') {
         let contentHtmls = childNodes.map(node => node.outerHTML);
@@ -1413,14 +1598,12 @@ export default function DocumentPreview({
         contentHtmls.forEach((html) => {
           const parserDiv = document.createElement('div');
           parserDiv.innerHTML = html;
-          const hElements = Array.from(parserDiv.querySelectorAll('h1, h2, h3, h4, h5'));
+          const hElements = Array.from(parserDiv.querySelectorAll('h1, h2, h3, h4, h5, h6'));
           hElements.forEach((h) => {
             const text = h.textContent?.trim() || '';
+            const level = parseInt(h.tagName.substring(1), 10);
+            if (!selectedTOCLevels.includes(level)) return;
             if (text) {
-              let level = 1;
-              if (h.tagName.startsWith('H') && h.tagName.length === 2) {
-                level = parseInt(h.tagName.substring(1), 10);
-              }
               detectedHeadings.push({
                 text,
                 level,
@@ -1461,6 +1644,7 @@ export default function DocumentPreview({
       try {
       let measureCount = 0;
       let lastMeasureYield = performance.now();
+      const compileServerBase = getCompileServerBase();
       const measureHTMLHeight = async (htmlContent: string): Promise<number> => {
         measureCount += 1;
         if (measureCount % PAGINATION_MEASURE_BATCH === 0) {
@@ -1473,9 +1657,49 @@ export default function DocumentPreview({
             }
           }
         }
-        tempMeasureContainer.innerHTML = htmlContent;
+        // Mermaid fences must be measured as their rendered SVG height; the raw
+        // diagram text measures far smaller and later overflows after mermaid
+        // replaces it with the real (taller) diagram.
+        const measuredContent = await renderMermaidBlocksInText(htmlContent);
+        tempMeasureContainer.innerHTML = measuredContent;
+        // Relative project images must resolve against the data server, and we
+        // must wait for them to load — otherwise unloaded <img> report ~0 height
+        // and get packed onto a page that later clips them with overflow:hidden.
+        if (compileServerBase) {
+          tempMeasureContainer.querySelectorAll('img').forEach((node) => {
+            const img = node as HTMLImageElement;
+            const raw = img.getAttribute('src');
+            if (!raw) return;
+            const resolved = resolveMeasureImageSrc(raw, compileServerBase);
+            if (resolved !== raw) img.setAttribute('src', resolved);
+          });
+        }
+        await waitForContainerImages(tempMeasureContainer);
+        if (paginationTokenRef.current !== token) {
+          throw new PaginationCancelled();
+        }
         return tempMeasureContainer.getBoundingClientRect().height;
       };
+
+      // Keep headings with their following content: never leave a heading
+      // orphaned at the bottom of a page alone (or with just 1-2 lines of the
+      // next block). We reserve KEEP_HEADING_LINES of body text so the heading
+      // and the start of its paragraph land on the same sheet. Applies to all
+      // APA levels (h1–h6) and run-in titles (span.apa-runin from h4/h5 with
+      // line-break off). When the next block is atomic (image, figure, …) we
+      // keep the *whole* next block — a few lines of an image is meaningless.
+      const KEEP_HEADING_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
+      const ATOMIC_KEEP_TAGS = new Set([
+        'IMG', 'FIGURE', 'PICTURE', 'SVG', 'CANVAS', 'VIDEO', 'AUDIO', 'IFRAME', 'HR',
+      ]);
+      const KEEP_HEADING_LINES = 3;
+      const isKeepWithNext = (tagName: string, className: string) =>
+        KEEP_HEADING_TAGS.has(tagName) || /\bapa-runin\b/.test(className || '');
+      let keepLineHeight = 0;
+      {
+        tempMeasureContainer.innerHTML = '<p style="margin:0 !important; padding:0 !important;">&nbsp;</p>';
+        keepLineHeight = tempMeasureContainer.getBoundingClientRect().height || 32;
+      }
 
       // Helper to tokenize HTML string safely (preventing breaking tags)
       const tokenizeHTML = (html: string): string[] => {
@@ -1655,13 +1879,42 @@ export default function DocumentPreview({
 
         // Check if fits entirely on the current page
         if (accumulatedPageHeight + elementHeight <= maxHeight) {
+          // Keep headings / run-in titles with the start of their following
+          // content. If that pair does not fit in the remaining space, push
+          // the title to a fresh page (only when the current page already has
+          // content, to avoid an infinite loop with oversized followers).
+          if (isKeepWithNext(item.tagName, item.className)) {
+            const nextItem = queue[qIndex];
+            if (
+              nextItem &&
+              !nextItem.isPageBreak &&
+              nextItem.html.trim() &&
+              hasVisibleContent(nextItem.html)
+            ) {
+              const nextFullHeight = await measureHTMLHeight(nextItem.html);
+              const nextIsAtomic =
+                ATOMIC_KEEP_TAGS.has(nextItem.tagName) ||
+                isKeepWithNext(nextItem.tagName, nextItem.className);
+              const keepHeight = nextIsAtomic
+                ? nextFullHeight
+                : Math.min(nextFullHeight, keepLineHeight * KEEP_HEADING_LINES);
+              if (
+                accumulatedPageHeight > 0 &&
+                accumulatedPageHeight + elementHeight + keepHeight > maxHeight
+              ) {
+                currentPageIndex++;
+                pagesList.push([]);
+                accumulatedPageHeight = 0;
+              }
+            }
+          }
           pagesList[currentPageIndex].push(item.html);
           accumulatedPageHeight += elementHeight;
           
           // Scrape headings for TOC
           const parserDiv = document.createElement('div');
           parserDiv.innerHTML = item.html;
-          const hElements = Array.from(parserDiv.querySelectorAll('h1, h2, h3'));
+          const hElements = Array.from(parserDiv.querySelectorAll('h1, h2, h3, h4, h5, h6'));
           if (isHeading) {
             const rootEl = parserDiv.firstElementChild as HTMLElement;
             if (rootEl && !hElements.includes(rootEl)) {
@@ -1670,10 +1923,12 @@ export default function DocumentPreview({
           }
           hElements.forEach((h) => {
             const text = h.textContent?.trim() || '';
+            const level = parseInt(h.tagName.substring(1), 10);
+            if (!selectedTOCLevels.includes(level)) return;
             if (text) {
               detectedHeadings.push({
                 text,
-                level: parseInt(h.tagName.substring(1), 10),
+                level,
                 page: currentPageIndex + (settings.showTOC ? 3 : 2),
                 pageRelative: currentPageIndex
               });
@@ -1690,57 +1945,66 @@ export default function DocumentPreview({
           const theadHeight = thead ? thead.getBoundingClientRect().height : 0;
           const rows = Array.from(tableEl.querySelectorAll('tbody > tr')) as HTMLElement[];
           
-          if (elementHeight <= maxHeight && accumulatedPageHeight > 0) {
-            // Fits entirely on a single fresh page, so push the entire table to next page
-            currentPageIndex++;
-            pagesList.push([]);
-            accumulatedPageHeight = 0;
-            pagesList[currentPageIndex].push(item.html);
-            accumulatedPageHeight += elementHeight;
-          } else {
-            // Table must be split!
-            const remainingHeight = maxHeight - accumulatedPageHeight;
-            const minStartHeight = theadHeight + (rows[0] ? rows[0].getBoundingClientRect().height : 30) * 2 + 15;
-            
-            if (remainingHeight < minStartHeight && accumulatedPageHeight > 0) {
+          if (rows.length === 0) {
+            // Nothing to split: place as-is (it already passed the whole-item fit
+            // check, or a fresh page will fit the whole table).
+            if (accumulatedPageHeight > 0) {
               currentPageIndex++;
               pagesList.push([]);
               accumulatedPageHeight = 0;
             }
-            
-            let currentPartRows: HTMLElement[] = [];
-            let currentPartHeight = theadHeight + 10;
-            let splitIndex = 0;
+            pagesList[currentPageIndex].push(item.html);
+            accumulatedPageHeight += elementHeight;
+            continue;
+          }
 
-            for (let i = 0; i < rows.length; i++) {
-              const row = rows[i];
-              const rowHeight = row.getBoundingClientRect().height;
-              const curLimit = maxHeight - accumulatedPageHeight;
-              
-              if (currentPartHeight + rowHeight > curLimit && currentPartRows.length > 0) {
-                const isCont = splitIndex > 0;
-                const tableHtml = buildTablePart(tableEl, currentPartRows, isCont);
-                pagesList[currentPageIndex].push(tableHtml);
-                splitIndex++;
+          // Always split the table across the boundary: fill the current page
+          // with as many rows as fit and continue the rest on the next page,
+          // instead of jumping the whole table away and leaving the current
+          // sheet with a large blank gap. Only when the leftover space is too
+          // small to start a meaningful fragment do we move the whole table to
+          // a fresh page (minStartHeight guard below).
+          const remainingHeight = maxHeight - accumulatedPageHeight;
+          const minStartHeight = theadHeight + (rows[0] ? rows[0].getBoundingClientRect().height : 30) * 2 + 15;
+          
+          if (remainingHeight < minStartHeight && accumulatedPageHeight > 0) {
+            currentPageIndex++;
+            pagesList.push([]);
+            accumulatedPageHeight = 0;
+          }
+          
+          let currentPartRows: HTMLElement[] = [];
+          let currentPartHeight = theadHeight + 10;
+          let splitIndex = 0;
 
-                currentPageIndex++;
-                pagesList.push([]);
-                accumulatedPageHeight = 0;
-                currentPartRows = [row];
-                const shouldRepeatHeader = settings.repeatTableHeader ?? true;
-                currentPartHeight = (shouldRepeatHeader ? theadHeight : 0) + 10 + rowHeight;
-              } else {
-                currentPartRows.push(row);
-                currentPartHeight += rowHeight;
-              }
-            }
+          for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            const rowHeight = row.getBoundingClientRect().height;
+            const curLimit = maxHeight - accumulatedPageHeight;
             
-            if (currentPartRows.length > 0) {
+            if (currentPartHeight + rowHeight > curLimit && currentPartRows.length > 0) {
               const isCont = splitIndex > 0;
               const tableHtml = buildTablePart(tableEl, currentPartRows, isCont);
               pagesList[currentPageIndex].push(tableHtml);
-              accumulatedPageHeight = currentPartHeight;
+              splitIndex++;
+
+              currentPageIndex++;
+              pagesList.push([]);
+              accumulatedPageHeight = 0;
+              currentPartRows = [row];
+              const shouldRepeatHeader = settings.repeatTableHeader ?? true;
+              currentPartHeight = (shouldRepeatHeader ? theadHeight : 0) + 10 + rowHeight;
+            } else {
+              currentPartRows.push(row);
+              currentPartHeight += rowHeight;
             }
+          }
+          
+          if (currentPartRows.length > 0) {
+            const isCont = splitIndex > 0;
+            const tableHtml = buildTablePart(tableEl, currentPartRows, isCont);
+            pagesList[currentPageIndex].push(tableHtml);
+            accumulatedPageHeight = currentPartHeight;
           }
         } else if (item.tagName === 'P') {
           // Paragraph splitting!
@@ -2143,7 +2407,7 @@ export default function DocumentPreview({
         pageBlocks.forEach((blockHtml) => {
           const parserDiv = document.createElement('div');
           parserDiv.innerHTML = blockHtml;
-          const hElements = Array.from(parserDiv.querySelectorAll('h1, h2, h3, h4, h5, .apa-runin'));
+          const hElements = Array.from(parserDiv.querySelectorAll('h1, h2, h3, h4, h5, h6, .apa-runin'));
           
           hElements.forEach((h) => {
             let text = h.textContent?.trim() || '';
@@ -2157,6 +2421,8 @@ export default function DocumentPreview({
                   level = parseInt(levelClass.replace('apa-level', ''), 10);
                 }
               }
+
+              if (!selectedTOCLevels.includes(level)) return;
 
               // Strip trailing period for TOC
               if (h.classList.contains('apa-runin') && text.endsWith('.')) {
@@ -2176,6 +2442,8 @@ export default function DocumentPreview({
 
       // 3. Paginate Table of Contents (TOC) if enabled
       let finalTOCPages: HeadingItem[][] = [];
+      const hasCover = resolvedCover.enabled !== false;
+      const coverOffset = hasCover ? 1 : 0;
       if (settings.showTOC) {
         const measureTOCPart = (headerText: string, items: HeadingItem[]): number => {
           let html = `<div class="toc-container select-text">`;
@@ -2199,50 +2467,81 @@ export default function DocumentPreview({
           return tempMeasureContainer.getBoundingClientRect().height;
         };
 
-        let currentPendingHeadings: HeadingItem[] = [];
-        let currentTOCPageIdx = 0;
+        // Merge user-defined "hidden" TOC entries (typed title + absolute page)
+        // into the auto-scraped headings so they appear in the generated index
+        // without requiring a visible heading in the source document.
+        const manualEntries: HeadingItem[] = (settings.manualTOCEntries || [])
+          .filter((e) => e && String(e.title ?? '').trim())
+          .map((e) => ({
+            text: String(e.title ?? '').trim(),
+            level: typeof e.level === 'number' && e.level >= 1 && e.level <= 5 ? e.level : 1,
+            page: typeof e.page === 'number' && isFinite(e.page) ? Math.max(1, Math.round(e.page)) : 1,
+            isManual: true,
+          }));
 
-        for (let i = 0; i < detectedHeadings.length; i++) {
-          const candidateList = [...currentPendingHeadings, detectedHeadings[i]];
-          const headerText = currentTOCPageIdx === 0 
-            ? (settings.tocTitle || "Tabla de Contenidos") 
-            : "";
-          
-          const hHeight = measureTOCPart(headerText, candidateList);
-          if (hHeight <= maxHeight) {
-            currentPendingHeadings.push(detectedHeadings[i]);
-          } else {
-            if (currentPendingHeadings.length > 0) {
-              finalTOCPages.push(currentPendingHeadings);
-              currentPendingHeadings = [detectedHeadings[i]];
-              currentTOCPageIdx++;
+        // tocList shares the same heading object references as detectedHeadings
+        // (which feeds dynamicHeadings / in-body [TOC] placeholders), so the page
+        // assignment below reaches both, but its ordering is independent: we sort
+        // it by page so manual entries fall in reading order. Sorting the shared
+        // objects' array here does NOT reorder detectedHeadings, keeping the
+        // data-heading-ref index mapping of the in-body [TOC] intact.
+        const tocList: HeadingItem[] = manualEntries.length
+          ? detectedHeadings.concat(manualEntries)
+          : detectedHeadings;
+
+        // Sort by page and paginate. The absolute page of auto headings depends
+        // on the TOC's own page count, which depends on item order, so converge
+        // over a couple of passes (auto pages only shift by a uniform offset when
+        // the TOC gains/loses a page, so this settles quickly).
+        for (let pass = 0; pass < 3; pass++) {
+          tocList.sort((a, b) => a.page - b.page);
+
+          let currentPendingHeadings: HeadingItem[] = [];
+          let currentTOCPageIdx = 0;
+          finalTOCPages = [];
+
+          for (let i = 0; i < tocList.length; i++) {
+            const candidateList = [...currentPendingHeadings, tocList[i]];
+            const headerText = currentTOCPageIdx === 0 
+              ? (settings.tocTitle || "Tabla de Contenidos") 
+              : "";
+            
+            const hHeight = measureTOCPart(headerText, candidateList);
+            if (hHeight <= maxHeight) {
+              currentPendingHeadings.push(tocList[i]);
             } else {
-              // Force at least one item per page to avoid infinite loops
-              finalTOCPages.push([detectedHeadings[i]]);
-              currentPendingHeadings = [];
-              currentTOCPageIdx++;
+              if (currentPendingHeadings.length > 0) {
+                finalTOCPages.push(currentPendingHeadings);
+                currentPendingHeadings = [tocList[i]];
+                currentTOCPageIdx++;
+              } else {
+                // Force at least one item per page to avoid infinite loops
+                finalTOCPages.push([tocList[i]]);
+                currentPendingHeadings = [];
+                currentTOCPageIdx++;
+              }
             }
           }
-        }
-        if (currentPendingHeadings.length > 0 || detectedHeadings.length === 0) {
-          finalTOCPages.push(currentPendingHeadings);
+          if (currentPendingHeadings.length > 0 || tocList.length === 0) {
+            finalTOCPages.push(currentPendingHeadings);
+          }
+
+          // Assign the absolute page numbers based on the final TOC pages count.
+          // Manual entries keep their user-typed absolute page untouched.
+          finalTOCPages.forEach((tocPage) => {
+            tocPage.forEach((heading) => {
+              if (heading.isManual) return;
+              const relPage = heading.pageRelative !== undefined ? heading.pageRelative : 0;
+              heading.page = relPage + 1 + coverOffset + finalTOCPages.length;
+            });
+          });
         }
       } else {
         finalTOCPages = [];
       }
 
-      const hasCover = resolvedCover.enabled !== false;
-      const coverOffset = hasCover ? 1 : 0;
-
-      // Assign the absolute page numbers based on the final TOC pages count
-      finalTOCPages.forEach((tocPage) => {
-        tocPage.forEach((heading) => {
-          const relPage = heading.pageRelative !== undefined ? heading.pageRelative : 0;
-          heading.page = relPage + 1 + coverOffset + finalTOCPages.length;
-        });
-      });
-
       detectedHeadings.forEach((heading) => {
+        if (heading.isManual) return;
         const relPage = heading.pageRelative !== undefined ? heading.pageRelative : 0;
         heading.page = relPage + 1 + coverOffset + (settings.showTOC ? finalTOCPages.length : 0);
       });
@@ -2277,7 +2576,37 @@ export default function DocumentPreview({
       paginationTokenRef.current += 1;
       setRecalculating(false);
     };
-  }, [resolvedHtmlContent, settings.pageSize, settings.orientation, settings.showTOC, settings.tocTitle, settings.blockStyleTOC, setPageCount, isLetter, leftMargin, rightMargin, topMargin, bottomMargin, pageHeight, settings.splitBlockCodeBorders, resolvedCover.enabled]);
+  }, [resolvedHtmlContent, settings.pageSize, settings.orientation, settings.showTOC, settings.tocTitle, settings.tocLevels, settings.manualTOCEntries, settings.blockStyleTOC, setPageCount, isLetter, leftMargin, rightMargin, topMargin, bottomMargin, pageHeight, settings.splitBlockCodeBorders, resolvedCover.enabled]);
+  // Initialize Mermaid diagrams after content changes
+  useEffect(() => {
+    const loadMermaid = async () => {
+      if (typeof window === 'undefined') return;
+      if ((window as any).mermaid) {
+        try {
+          (window as any).mermaid.initialize({ startOnLoad: false, theme: 'default' });
+          (window as any).mermaid.run();
+        } catch (e) {
+          console.error('Mermaid run error:', e);
+        }
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+      script.onload = () => {
+        try {
+          (window as any).mermaid.initialize({ startOnLoad: false, theme: 'default' });
+          (window as any).mermaid.run();
+        } catch (e) {
+          console.error('Mermaid init error:', e);
+        }
+      };
+      document.body.appendChild(script);
+    };
+    // Run after a short delay to ensure DOM is updated
+    const timer = setTimeout(loadMermaid, 500);
+    return () => clearTimeout(timer);
+  }, [resolvedHtmlContent]);
+
 
   // Detector de Desbordes Gráfico: Encuentra elementos cuyo ancho o largo excede el espacio neto disponible de la página.
   useEffect(() => {
@@ -2898,7 +3227,7 @@ export default function DocumentPreview({
           ) : builtHtmlExists && builtHtml ? (
             <iframe
               key={`built-${sandboxReloadKey}`}
-              srcDoc={builtHtml}
+              srcDoc={sandboxHtml}
               title="Interactive Document Sandbox"
               className="w-full h-full flex-1 border-0 bg-white block"
               sandbox="allow-scripts allow-same-origin allow-popups allow-modals allow-forms"
@@ -2945,7 +3274,7 @@ export default function DocumentPreview({
                 orientation={settings.orientation} 
                 marginElements={settings.marginElements}
                 totalPages={1 + paginatedPages.length + (settings.showTOC ? paginatedTOCPages.length : 0)}
-                uploadedFiles={uploadedFiles}
+                uploadedFiles={activeUploadedFiles}
               />
             </div>
           )}
@@ -2967,38 +3296,42 @@ export default function DocumentPreview({
                 settings={settings}
                 showGuides={settings.showGuides}
                 coverConfig={resolvedCover}
-                uploadedFiles={uploadedFiles}
+                uploadedFiles={activeUploadedFiles}
               >
-                <div className="toc-container select-text">
-                  {isFirst && (
-                    <div className="toc-header">
-                      {settings.tocTitle || "Tabla de Contenidos"}
-                    </div>
-                  )}
-                  <ul className="toc-list">
-                    {tocPageHeadings.map((heading, hIdx) => {
-                      const levelClass = `toc-level-${heading.level}`;
-                      // Absolute page calculations
-                      const absolutePage = (heading.pageRelative !== undefined ? heading.pageRelative : 0) + 1 + coverOffset + paginatedTOCPages.length;
-
-                      return (
-                        <li 
-                          key={hIdx} 
-                          className={`toc-item ${levelClass}`}
-                        >
-                          <span className="toc-title">{heading.text}</span>
-                          <span className="toc-dots" />
-                          <span className="toc-page">{absolutePage}</span>
-                        </li>
-                      );
-                    })}
-                    {tocPageHeadings.length === 0 && (
-                      <li className="text-gray-400 italic text-center w-full py-4 flex justify-center items-center">
-                        (Inserte títulos H1 o H2 en el editor de contenido para generar el índice automático)
-                      </li>
+                <section
+                  className="mdwp-toc-engine-slot"
+                  data-mdwp-toc-slot={tIdx}
+                  data-mdwp-toc-page={pageNum}
+                >
+                  <div className="toc-container select-text">
+                    {isFirst && (
+                      <div className="toc-header">
+                        {settings.tocTitle || "Tabla de Contenidos"}
+                      </div>
                     )}
-                  </ul>
-                </div>
+                    <ul className="toc-list">
+                      {tocPageHeadings.map((heading, hIdx) => {
+                        const levelClass = `toc-level-${heading.level}`;
+
+                        return (
+                          <li
+                            key={hIdx}
+                            className={`toc-item ${levelClass}`}
+                          >
+                            <span className="toc-title">{heading.text}</span>
+                            <span className="toc-dots" />
+                            <span className="toc-page">{heading.page}</span>
+                          </li>
+                        );
+                      })}
+                      {tocPageHeadings.length === 0 && (
+                        <li className="text-gray-400 italic text-center w-full py-4 flex justify-center items-center">
+                          (Inserte títulos H1 o H2 en el editor de contenido para generar el índice automático)
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                </section>
               </PageTemplate>
             );
           })}
@@ -3037,7 +3370,7 @@ export default function DocumentPreview({
                   settings={settings}
                   showGuides={settings.showGuides}
                   coverConfig={resolvedCover}
-                  uploadedFiles={uploadedFiles}
+                  uploadedFiles={activeUploadedFiles}
                   isTemplatePage={isTemplatePage}
                 >
                   <div
@@ -3056,7 +3389,7 @@ export default function DocumentPreview({
               settings={settings}
               showGuides={settings.showGuides}
               coverConfig={resolvedCover}
-              uploadedFiles={uploadedFiles}
+              uploadedFiles={activeUploadedFiles}
             >
               <div className="flex flex-col items-center justify-center text-center h-full text-gray-300 gap-2 select-none border-2 border-dashed border-gray-100 rounded-lg p-6">
                 <FileText className="w-12 h-12 text-gray-200" />

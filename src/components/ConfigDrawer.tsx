@@ -65,6 +65,7 @@ interface ConfigDrawerProps {
   userApiKey?: string;
   markdownSource?: string;
   onMarkdownSourceChange?: (next: string) => void;
+  debounceDelay?: number;
 }
 
 const DEFAULT_TABLE_CSS = `/* Academic Table Style */
@@ -181,14 +182,28 @@ function AutoGrowingTextArea({
   value,
   onChange,
   placeholder,
+  debounceDelay = 300,
   className = 'text-slate-200',
 }: {
   value: string;
   onChange: (val: string) => void;
   placeholder?: string;
+  debounceDelay?: number;
   className?: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [localValue, setLocalValue] = useState(value);
+  const lastPropagatedRef = useRef<string>(value);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Sync with outer changes only if they were initiated externally (e.g. 
+  // templates, file loads, undo/reverts)
+  useEffect(() => {
+    if (value !== lastPropagatedRef.current) {
+      setLocalValue(value);
+      lastPropagatedRef.current = value;
+    }
+  }, [value]);
 
   const adjustHeight = () => {
     const textarea = textareaRef.current;
@@ -200,16 +215,54 @@ function AutoGrowingTextArea({
 
   useEffect(() => {
     adjustHeight();
-  }, [value]);
+  }, [localValue]);
+
+  // Cleanup active timer on unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const handleChange = (newVal: string) => {
+    setLocalValue(newVal);
+    adjustHeight();
+
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+
+    if (debounceDelay <= 0) {
+      lastPropagatedRef.current = newVal;
+      onChange(newVal);
+    } else {
+      timerRef.current = setTimeout(() => {
+        lastPropagatedRef.current = newVal;
+        onChange(newVal);
+      }, debounceDelay);
+    }
+  };
+
+  // Flush any pending debounced change on blur so the cover HTML is compiled
+  // even if the user clicks away before the delay elapses
+  const handleBlur = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+      lastPropagatedRef.current = localValue;
+      onChange(localValue);
+    }
+  };
 
   return (
     <textarea
       ref={textareaRef}
-      value={value}
-      onChange={(e) => {
-        onChange(e.target.value);
-        adjustHeight();
-      }}
+      value={localValue}
+      onChange={(e) => handleChange(e.target.value)}
+      onBlur={handleBlur}
       style={{ resize: 'none' }}
       className={`w-full p-2.5 bg-slate-950 border border-slate-800 rounded font-mono text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none overflow-y-hidden ${className}`}
       placeholder={placeholder}
@@ -332,6 +385,7 @@ export function ConfigDrawer({
   userApiKey,
   markdownSource,
   onMarkdownSourceChange,
+  debounceDelay = 300,
 }: ConfigDrawerProps) {
   const { language, t } = useLanguage();
   const [successMsg, setSuccessMsg] = useState<string>('');
@@ -512,7 +566,7 @@ export function ConfigDrawer({
     const list: HeadingItem[] = [];
 
     // Preferred path: scan the qmd source (markdown) line by line. The
-    // document content now lives in contenido_fuente.qmd rather than in
+    // document content now lives in contenido_fuente.md rather than in
     // htmlBlocks (the built-in HTML editor was removed).
     if (markdownSource !== undefined) {
       const lines = markdownSource.split('\n');
@@ -1279,6 +1333,7 @@ Márgenes de Página (Bordes):
               <AutoGrowingTextArea
                 value={cover.overlayMarkdown || ''}
                 onChange={(val) => handleCoverChange('overlayMarkdown', val)}
+                debounceDelay={debounceDelay}
                 className="text-white"
                 placeholder={language === 'es' ? "Escribe el contenido en Markdown de la carátula..." : "Write cover page Markdown content..."}
               />
@@ -1298,6 +1353,7 @@ Márgenes de Página (Bordes):
               <AutoGrowingTextArea
                 value={cover.overlayTemplate || ''}
                 onChange={(val) => handleCoverChange('overlayTemplate', val)}
+                debounceDelay={debounceDelay}
                 className="text-green-400 font-mono text-xs"
                 placeholder={language === 'es' ? "Escribe solo tus reglas CSS de la carátula..." : "Write only your cover CSS rules..."}
               />
@@ -2141,7 +2197,7 @@ Abril 2026 - Julio 2026
                     
                     {headings.length === 0 ? (
                       <div className="p-4 bg-slate-950/40 rounded border border-slate-850 text-center text-slate-500 text-[11px]">
-                        No se detectaron títulos en el documento. Añade marcas de Markdown #, ##, ### en tu archivo de contenido (contenido_fuente.qmd).
+                        No se detectaron títulos en el documento. Añade marcas de Markdown #, ##, ### en tu archivo de contenido (contenido_fuente.md).
                       </div>
                     ) : (
                       <div className="flex flex-col gap-1.5 max-h-[300px] overflow-y-auto pr-1 custom-scrollbar border border-slate-850 bg-slate-950/20 rounded p-2">
@@ -2203,38 +2259,6 @@ Abril 2026 - Julio 2026
                 Ajustes Generales del Índice
               </span>
 
-              {/* Table of contents indices toggle */}
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-[9.5px] font-bold text-slate-350 uppercase">Mostrar Tabla de Contenidos (TOC)</span>
-                  <button
-                    disabled={settings.pageSize === 'continuous'}
-                    onClick={() => handleSettingsChange('showTOC', !settings.showTOC)}
-                    className={`text-xs px-2.5 py-1 rounded border font-bold transition-all ${
-                      settings.pageSize === 'continuous'
-                        ? 'bg-slate-900 border-slate-950 text-slate-600 opacity-40 cursor-not-allowed'
-                        : settings.showTOC 
-                          ? 'bg-[#004080] border-[#FF6600] text-white cursor-pointer' 
-                          : 'bg-slate-900 border-slate-800 text-slate-500 cursor-pointer'
-                    }`}
-                    title={settings.pageSize === 'continuous' ? "Deshabilitado en Tira Continua" : ""}
-                  >
-                    {settings.showTOC ? 'SÍ, MOSTRAR' : 'NO, OCULTAR'}
-                  </button>
-                </div>
-                {settings.showTOC && (
-                  <div className="flex flex-col gap-1 mt-2 border-t border-slate-900 pt-2">
-                    <label className="text-[8px] text-slate-400 font-bold uppercase">Título del Índice</label>
-                    <input
-                      type="text"
-                      value={settings.tocTitle || 'Tabla de Contenidos'}
-                      onChange={(e) => handleSettingsChange('tocTitle', e.target.value)}
-                      className="p-1.5 bg-slate-900 border border-slate-850 rounded text-slate-200 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
-                    />
-                  </div>
-                )}
-              </div>
-
               {/* Headings autonumbering toggle */}
               <div className="flex items-center justify-between border-t border-slate-900 pt-3">
                 <span className="text-[9.5px] font-bold text-slate-350 uppercase">Auto-Numerar Títulos (H1, H2, H3)</span>
@@ -2249,6 +2273,121 @@ Abril 2026 - Julio 2026
                   {settings.autoNumberHeadings ? 'SÍ (1. 2. 2.1)' : 'NO'}
                 </button>
               </div>
+
+              <div className="border-t border-slate-900 pt-3">
+                <span className="text-[9.5px] font-bold text-slate-350 uppercase">Niveles incluidos en el índice</span>
+                <div className="grid grid-cols-3 gap-2 mt-2">
+                  {[1, 2, 3, 4, 5, 6].map((level) => {
+                    const selectedLevels = settings.tocLevels ?? [1, 2];
+                    const checked = selectedLevels.includes(level);
+                    return (
+                      <label key={level} className="flex items-center gap-1.5 text-[10px] text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const nextLevels = checked
+                              ? selectedLevels.filter((item) => item !== level)
+                              : [...selectedLevels, level].sort((a, b) => a - b);
+                            handleSettingsChange('tocLevels', nextLevels);
+                          }}
+                          className="accent-orange-500"
+                        />
+                        H{level}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* 2b. Hidden/Manual TOC entries */}
+            <div className="flex flex-col gap-3 p-3 bg-slate-950 rounded border border-slate-850">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                  Entradas Manuales del Índice
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const current = settings.manualTOCEntries || [];
+                    handleSettingsChange('manualTOCEntries', [...current, { title: '', page: 1, level: 1 }]);
+                  }}
+                  className="px-2 py-1 bg-[#004080] hover:bg-[#005299] border border-[#FF6600] text-white text-[9px] font-bold rounded transition-all cursor-pointer"
+                  title="Añadir un título oculto al índice"
+                >
+                  + Añadir
+                </button>
+              </div>
+              <p className="text-[9px] text-slate-500 leading-relaxed">
+                Títulos que no existen como encabezado en el contenido pero que sí deben aparecer en la tabla de contenidos. Indica el título y la página absoluta donde se encuentra (p.&nbsp;ej. "Línea de Tiempo" en la página 19).
+              </p>
+
+              {(settings.manualTOCEntries || []).length === 0 ? (
+                <div className="p-3 bg-slate-950/40 rounded border border-slate-850 text-slate-500 text-[10px] italic text-center">
+                  Sin entradas manuales. Añade una para incluir contenido oculto en el índice.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {(settings.manualTOCEntries || []).map((entry, idx) => (
+                    <div key={idx} className="flex flex-col gap-1.5 p-2 bg-slate-900/40 border border-slate-800 rounded">
+                      <input
+                        type="text"
+                        placeholder="Título (ej. Línea de Tiempo)"
+                        value={entry.title || ''}
+                        onChange={(e) => {
+                          const updated = (settings.manualTOCEntries || []).map((x, i) =>
+                            i === idx ? { ...x, title: e.target.value } : x
+                          );
+                          handleSettingsChange('manualTOCEntries', updated);
+                        }}
+                        className="p-1.5 bg-slate-900 border border-slate-850 rounded text-slate-200 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                      />
+                      <div className="flex items-center gap-2">
+                        <label className="text-[8px] text-slate-400 font-bold uppercase shrink-0">Página</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={entry.page || 1}
+                          onChange={(e) => {
+                            const updated = (settings.manualTOCEntries || []).map((x, i) =>
+                              i === idx ? { ...x, page: parseInt(e.target.value, 10) || 1 } : x
+                            );
+                            handleSettingsChange('manualTOCEntries', updated);
+                          }}
+                          className="w-16 p-1.5 bg-slate-900 border border-slate-850 rounded text-slate-200 text-xs text-center focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                        />
+                        <label className="text-[8px] text-slate-400 font-bold uppercase shrink-0 ml-1">Nivel</label>
+                        <select
+                          value={entry.level || 1}
+                          onChange={(e) => {
+                            const updated = (settings.manualTOCEntries || []).map((x, i) =>
+                              i === idx ? { ...x, level: parseInt(e.target.value, 10) || 1 } : x
+                            );
+                            handleSettingsChange('manualTOCEntries', updated);
+                          }}
+                          className="p-1.5 bg-slate-900 border border-slate-850 rounded text-slate-200 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                        >
+                          <option value={1}>1</option>
+                          <option value={2}>2</option>
+                          <option value={3}>3</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = (settings.manualTOCEntries || []).filter((_, i) => i !== idx);
+                            handleSettingsChange('manualTOCEntries', updated);
+                          }}
+                          className="ml-auto px-2 py-1 bg-slate-900 hover:bg-red-950 border border-slate-800 text-slate-400 hover:text-red-400 text-[9px] font-bold rounded transition-all cursor-pointer"
+                          title="Eliminar esta entrada"
+                        >
+                          Eliminar
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* 3. CSS Customization Editor for blockStyleTOC */}

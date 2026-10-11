@@ -62,25 +62,27 @@ function createWindow(folder) {
 
 // ---- Manifest helpers ---------------------------------------------------
 const MANIFEST_NAME = 'configuracion_metadatos.json';
-const CONTENT_NAME = 'contenido_fuente.qmd';
+const PROJECT_DATA_DIR = '.mdwp';
+const CONTENT_NAME = 'contenido_fuente.md';
 const BIB_NAME = 'bibliografia.bib';
 
 function manifestPath(folder) {
-  return path.join(folder, MANIFEST_NAME);
+  const nested = path.join(folder, PROJECT_DATA_DIR, MANIFEST_NAME);
+  return fs.existsSync(nested) ? nested : path.join(folder, MANIFEST_NAME);
 }
 
 // ---- Project folder watcher ----------------------------------------------
 // Detects when the preview should refresh (a new `mdwp build` run rewrites
-// documento_formateado.html, or the source qmd/config files change on disk),
+// documento_formateado.html, or the source md/config files change on disk),
 // and tells the renderer to reload the project.
-const PROJECT_WATCH_FILES = [CONTENT_NAME, 'contenido_fuente.md', MANIFEST_NAME, 'documento_formateado.html'];
+const PROJECT_WATCH_FILES = [CONTENT_NAME, 'contenido_fuente.qmd', 'portada.md', MANIFEST_NAME, 'documento_formateado.html'];
 
 function watchProject(win, folder) {
   if (!folder || !fs.existsSync(folder) || !win) return;
   try {
-    win._watcher = fs.watch(folder, { persistent: false }, (_event, filename) => {
+    const onChange = (_event, filename) => {
       if (!filename) return;
-      const relevant = PROJECT_WATCH_FILES.includes(filename);
+      const relevant = PROJECT_WATCH_FILES.includes(String(filename)) || String(filename) === PROJECT_DATA_DIR;
       if (!relevant) return;
       if (win._watchTimer) clearTimeout(win._watchTimer);
       win._watchTimer = setTimeout(() => {
@@ -88,7 +90,23 @@ function watchProject(win, folder) {
           win.webContents.send('project:changed');
         }
       }, 300);
-    });
+    };
+    win._watchers = [];
+    const attachDataWatcher = () => {
+      if (win._dataWatcherAttached) return;
+      const dataDir = path.join(folder, PROJECT_DATA_DIR);
+      if (!fs.existsSync(dataDir) || !fs.statSync(dataDir).isDirectory()) return;
+      win._watcherData = fs.watch(dataDir, { persistent: false }, (_event, filename) => {
+        if (String(filename || '') === MANIFEST_NAME) onChange(_event, PROJECT_DATA_DIR);
+      });
+      win._watchers.push(win._watcherData);
+      win._dataWatcherAttached = true;
+    };
+    win._watchers.push(fs.watch(folder, { persistent: false }, (_event, filename) => {
+      if (String(filename || '') === PROJECT_DATA_DIR) attachDataWatcher();
+      onChange(_event, filename);
+    }));
+    attachDataWatcher();
   } catch (e) {
     console.error('No se pudo vigilar la carpeta del proyecto:', e.message);
   }
@@ -100,14 +118,12 @@ function stopProjectWatch(win) {
     clearTimeout(win._watchTimer);
     win._watchTimer = null;
   }
-  if (win._watcher) {
-    try {
-      win._watcher.close();
-    } catch (e) {
-      /* ignore */
-    }
-    win._watcher = null;
+  for (const watcher of win._watchers || []) {
+    try { watcher.close(); } catch (e) { /* ignore */ }
   }
+  win._watchers = [];
+  win._dataWatcherAttached = false;
+  win._watcherData = null;
 }
 
 // ---- IPC: tell the renderer the current project folder ------------------
@@ -229,9 +245,9 @@ ipcMain.handle('project:readFolder', async (_evt, folder) => {
   }
 
   // Read the content file referenced by the manifest (or default name).
-  // Fall back to the legacy .md name so older projects (created before .qmd)
+  // Fall back to the legacy .qmd name so older projects (created before .md)
   // keep working without needing the manifest to record their content file.
-  const legacyContentName = 'contenido_fuente.md';
+  const legacyContentName = 'contenido_fuente.qmd';
   let contentPath =
     manifest.contentFile ||
     (fs.existsSync(path.join(dir, CONTENT_NAME)) ? path.join(dir, CONTENT_NAME) : path.join(dir, legacyContentName));
@@ -263,31 +279,50 @@ ipcMain.handle('project:readFolder', async (_evt, folder) => {
     stylesPath = null;
   }
 
-  // Collect local image files so the renderer can embed them by filename
+  const coverPath = path.join(dir, 'portada.md');
+  const coverText = fs.existsSync(coverPath) && fs.statSync(coverPath).isFile()
+    ? fs.readFileSync(coverPath, 'utf8')
+    : '';
+
+  // Collect local image files so the renderer can embed them by filename.
+  // Walk nested project asset folders too (for example `img/logo.png`), since
+  // the paginated preview and srcDoc sandbox cannot resolve those paths from
+  // the Electron app origin.
   const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp'];
   let images = [];
+  const imageByName = new Map();
   try {
-    const entries = await fsp.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (imageExts.includes(ext)) {
-          const abs = path.join(dir, entry.name);
-          const buf = await fsp.readFile(abs);
-          images.push({
-            name: entry.name,
-            type: 'image/' + ext.slice(1).replace('jpg', 'jpeg'),
-            size: buf.length,
-            dataUrl: `data:image/${ext.slice(1).replace('jpg', 'jpeg')};base64,${buf.toString('base64')}`,
-          });
+    const visitImageFiles = async (imageDir) => {
+      let entries = [];
+      try { entries = await fsp.readdir(imageDir, { withFileTypes: true }); } catch (e) { return; }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (entry.name === 'node_modules' || entry.name === '.git') continue;
+          await visitImageFiles(path.join(imageDir, entry.name));
+          continue;
+        }
+        if (entry.isFile()) {
+          const ext = path.extname(entry.name).toLowerCase();
+          if (imageExts.includes(ext)) {
+            const abs = path.join(imageDir, entry.name);
+            const buf = await fsp.readFile(abs);
+            imageByName.set(entry.name, {
+              name: entry.name,
+              type: 'image/' + ext.slice(1).replace('jpg', 'jpeg'),
+              size: buf.length,
+              dataUrl: `data:image/${ext.slice(1).replace('jpg', 'jpeg')};base64,${buf.toString('base64')}`,
+            });
+          }
         }
       }
-    }
+    };
+    await visitImageFiles(dir);
   } catch (e) {
     images = [];
   }
+  images = Array.from(imageByName.values());
 
-  return { folder: dir, manifest, contentPath, contentText, bibPath, bibtex, stylesPath, stylesText, images };
+  return { folder: dir, manifest, contentPath, contentText, bibPath, bibtex, stylesPath, stylesText, coverPath: coverText ? coverPath : null, coverText, images };
 });
 
 // ---- IPC: save a project (write manifest + copied content + base64 images) --
@@ -328,14 +363,18 @@ ipcMain.handle(
         const match = img.dataUrl.match(/^data:[^;]+;base64,(.*)$/s);
         if (match) {
           const buf = Buffer.from(match[1], 'base64');
-          fs.writeFileSync(path.join(dir, img.name), buf);
+          const dataDir = path.join(dir, PROJECT_DATA_DIR);
+          fs.mkdirSync(dataDir, { recursive: true });
+          fs.writeFileSync(path.join(dataDir, img.name), buf);
           imageNames.push(img.name);
         }
       }
     }
 
     // Write the manifest last, so a partial write never looks like a valid project
-    fs.writeFileSync(manifestPath(dir), JSON.stringify(manifest, null, 2), 'utf8');
+    const dataDir = path.join(dir, PROJECT_DATA_DIR);
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, MANIFEST_NAME), JSON.stringify(manifest, null, 2), 'utf8');
 
     return { ok: true, folder: dir, contentPath: finalContentPath, bibPath: finalBibPath, imageNames };
   }

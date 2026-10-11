@@ -10,10 +10,16 @@ const DIST = path.join(ROOT, 'dist');
 const OUT_NAME = 'documento_formateado.html';
 const PDF_NAME = 'documento.pdf';
 
-// Content file written by `mdwp new`. We use Quarto (.qmd) so the file ships
-// with YAML front matter that the renderer strips when previewing and that
-// Quarto consumes when exporting to .docx.
-const CONTENT_NAME = 'contenido_fuente.qmd';
+// Content file written by `mdwp new`. We default to a plain Markdown (.md)
+// file (with YAML front matter, still consumable by Quarto/Pandoc when
+// exporting to .docx). Legacy projects created with .qmd keep working via the
+// fallback branch inside readYamlTitle.
+const CONTENT_NAME = 'contenido_fuente.md';
+const COVER_NAME = 'portada.md';
+const PROJECT_DATA_DIR = '.mdwp';
+const MANIFEST_NAME = 'configuracion_metadatos.json';
+const TOC_DATA_NAME = 'toc.json';
+const TOC_ENGINE_NAME = 'toc-engine.cjs';
 // Reference .docx (styles) copied into every new project and referenced from
 // the YAML `format.docx.reference-doc` so Quarto uses it when exporting. It
 // ships with the repo under public/ so `mdwp new` is fully self-contained.
@@ -27,7 +33,12 @@ function usage() {
       'mdwp — generador de documentos académicos de escritorio',
       '',
       'Uso:',
-      '  mdwp new [nombre]      Crea un nuevo proyecto (portada, qmd con YAML, docx de referencia, sin contenido)',
+      '  mdwp new [nombre]      Crea un nuevo proyecto (portada, md con YAML, docx de referencia, sin contenido)',
+      '  mdwp new <url-moodle>  Crea un proyecto desde una tarea de Moodle: descarga el adjunto, genera',
+      '                         el contenido con DeepSeek (Chrome/CDP) y construye la carátula',
+      '                         --attach <ruta|url>  adjunto explícito si Moodle no lo expone',
+      '                         --dir <carpeta>     carpeta destino (por defecto, el nombre de la tarea)',
+      '                         --no-llm            solo datos de Moodle, sin generar contenido',
       '  mdwp open [carpeta]    Abre la interfaz de edición (Electron)',
       '  mdwp build [carpeta]   Compila y abre el resultado en el navegador',
       '  mdwp pdf [carpeta]     Compila y genera un PDF en la carpeta',
@@ -60,7 +71,7 @@ function detectChrome() {
 
 // ---- Static + project server ----------------------------------------------
 // The built app is served under /app/ and the project folder is served at the
-// root (so the renderer can fetch configuracion_metadatos.json, the content
+// root (so the renderer can fetch .mdwp/configuracion_metadatos.json, the content
 // file and any images). Output is received via POST /__output.
 function startServer(project) {
   const server = http.createServer((req, res) => {
@@ -75,6 +86,9 @@ function startServer(project) {
           const html = String(data.html || '');
           const mode = data.mode || 'build';
           const outFile = mode === 'pdf' ? OUT_NAME : OUT_NAME;
+          if (data.toc && Array.isArray(data.toc.pages)) {
+            fs.writeFileSync(path.join(project, PROJECT_DATA_DIR, TOC_DATA_NAME), JSON.stringify(data.toc, null, 2) + '\n', 'utf8');
+          }
           fs.writeFileSync(path.join(project, outFile), html, 'utf8');
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, file: outFile, count: html.length }));
@@ -155,10 +169,10 @@ function mime(file) {
 }
 
 // ---- YAML helpers ---------------------------------------------------------
-// Read the `title` from a .qmd/.md YAML front matter block, so the compiled
+// Read the `title` from a .md/.qmd YAML front matter block, so the compiled
 // document is named by the content's title instead of the project folder name.
 function readYamlTitle(project) {
-  for (const name of [CONTENT_NAME, 'contenido_fuente.md']) {
+  for (const name of [CONTENT_NAME, 'contenido_fuente.qmd']) {
     const file = path.join(project, name);
     if (!fs.existsSync(file)) continue;
     const text = fs.readFileSync(file, 'utf8');
@@ -255,7 +269,50 @@ async function renderCompile(basename, project, mode) {
     process.exit(1);
   }
 
-  const html = fs.readFileSync(outPath, 'utf8');
+  let html = fs.readFileSync(outPath, 'utf8');
+  const tocDataPath = path.join(project, PROJECT_DATA_DIR, TOC_DATA_NAME);
+  const tocEnginePath = path.join(project, TOC_ENGINE_NAME);
+  // Upgrade older projects on first build. Once created, this project-local
+  // engine is never replaced by mdwp, so user edits remain theirs.
+  if (fs.existsSync(tocDataPath) && !fs.existsSync(tocEnginePath)) {
+    fs.writeFileSync(tocEnginePath, DEFAULT_TOC_ENGINE, 'utf8');
+  }
+  if (fs.existsSync(tocDataPath) && fs.existsSync(tocEnginePath)) {
+    const tocData = JSON.parse(fs.readFileSync(tocDataPath, 'utf8'));
+    delete require.cache[require.resolve(tocEnginePath)];
+    const engineModule = require(tocEnginePath);
+    const renderTOC = typeof engineModule === 'function' ? engineModule : engineModule.renderTOC;
+    if (typeof renderTOC !== 'function') {
+      throw new Error(`${TOC_ENGINE_NAME} must export a function or { renderTOC(data) }`);
+    }
+    const rendered = renderTOC(tocData);
+    const pageHtml = Array.isArray(rendered) ? rendered : [rendered];
+    const replacedSlots = new Set();
+    html = html.replace(/<section\b(?=[^>]*\bdata-mdwp-toc-slot="(\d+)")[^>]*>[\s\S]*?<\/section>/g, (slot, index) => {
+      const i = Number(index);
+      replacedSlots.add(i);
+      return pageHtml[i] == null ? '' : String(pageHtml[i]);
+    });
+    const inlineBySlot = new Map((Array.isArray(tocData.inline) ? tocData.inline : []).map((entry) => [Number(entry.slot) || 0, entry]));
+    const replacedInlineSlots = new Set();
+    html = html.replace(/<section\b(?=[^>]*\bdata-mdwp-toc-inline="(\d+)")[^>]*>[\s\S]*?<\/section>/g, (slot, index) => {
+      const slotIndex = Number(index);
+      const inlineData = inlineBySlot.get(slotIndex);
+      if (!inlineData) return slot;
+      const inlineRendered = renderTOC({ ...tocData, pages: [{ page: inlineData.page, titles: inlineData.titles }] });
+      const inlineHtml = Array.isArray(inlineRendered) ? inlineRendered[0] : inlineRendered;
+      replacedInlineSlots.add(slotIndex);
+      return inlineHtml == null ? '' : String(inlineHtml);
+    });
+    const expectedSlots = Array.isArray(tocData.pages) ? tocData.pages.length : 0;
+    if (replacedSlots.size !== expectedSlots) {
+      console.warn(`  ⚠ TOC engine: ${expectedSlots} data pages, ${replacedSlots.size} output slots; check that TOC pages are enabled.`);
+    }
+    if (replacedInlineSlots.size !== inlineBySlot.size) {
+      console.warn(`  ⚠ TOC engine: ${inlineBySlot.size} inline TOC entries, ${replacedInlineSlots.size} output slots.`);
+    }
+    if (replacedSlots.size > 0 || replacedInlineSlots.size > 0) fs.writeFileSync(outPath, html, 'utf8');
+  }
   output = html;
 
   if (mode === 'pdf') {
@@ -279,7 +336,7 @@ async function renderCompile(basename, project, mode) {
     try {
       // Load the standalone HTML from the running server instead of
       // page.setContent(). setContent() uses an about:blank base URL, so
-      // relative image paths (e.g. src="icon.png") can never resolve and the
+      // relative image paths (e.g. src=".mdwp/icon.png") can never resolve and the
       // PDF would come out without images. The server serves the project
       // folder at its root, so relative paths resolve correctly here.
       await pdfPage.goto(`${base}/${OUT_NAME}`, { waitUntil: 'load', timeout: 60000 });
@@ -455,6 +512,57 @@ const DEFAULT_BLOCK_TOC = `.toc-header {
   font-size: 16px;
 }`;
 
+const DEFAULT_TOC_JSON = {
+  title: 'Tabla de Contenidos',
+  pages: [],
+};
+
+// This project-owned engine is copied once by `mdwp new`. Builds execute it,
+// but never rewrite it, so users can freely change the TOC design/HTML.
+const DEFAULT_TOC_ENGINE = `function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
+// Input shape: { title, pages: [{ page, titles: [{ title, page, level }] }] }.
+// Return one HTML string per page. Edit this file to change the TOC design;
+// mdwp build refreshes toc.json but leaves this engine untouched.
+function renderTOC(data) {
+  const pages = Array.isArray(data.pages) ? data.pages : [];
+  return pages.map((page, index) => {
+    const rows = (Array.isArray(page.titles) ? page.titles : []).map((entry) => {
+      const level = Math.max(1, Math.min(6, Number(entry.level) || 1));
+      return '<div class="toc-engine-entry toc-level-' + level + '">' +
+        '<span class="toc-engine-title">' + escapeHtml(entry.title) + '</span>' +
+        '<span class="toc-engine-leader" aria-hidden="true"></span>' +
+        '<span class="toc-engine-page-number">' + escapeHtml(entry.page) + '</span>' +
+      '</div>';
+    }).join('') || '<p class="toc-engine-empty">No headings were selected for the table of contents.</p>';
+    return '<style>' +
+      '.toc-engine-page{font-family:"Times New Roman",Times,serif;font-size:16px;}' +
+      '.toc-engine-header{margin:0 0 24px;font-size:16px;font-weight:bold;text-align:center;}' +
+      '.toc-engine-entry{display:flex;align-items:baseline;gap:8px;line-height:2;margin:0 0 8px;}' +
+      '.toc-engine-title{flex:0 1 auto;}' +
+      '.toc-engine-leader{flex:1 1 auto;border-bottom:1px dotted #222!important;min-width:12px;}' +
+      '.toc-engine-empty{color:#667085;font-style:italic;text-align:center;}' +
+      '.toc-engine-page-number{font-weight:bold;}' +
+      '.toc-level-1{font-weight:bold;}' +
+      '.toc-level-2{padding-left:24px;}' +
+      '.toc-level-3{padding-left:48px;font-style:italic;}' +
+      '.toc-level-4,.toc-level-5,.toc-level-6{padding-left:64px;}' +
+      '@media print{.toc-engine-entry{break-inside:avoid;}}' +
+    '</style>' +
+    '<div class="toc-engine-page">' +
+      (index === 0 ? '<div class="toc-engine-header">' + escapeHtml(data.title || 'Tabla de Contenidos') + '</div>' : '') +
+      '<div class="toc-engine-entries">' + rows + '</div>' +
+    '</div>';
+  });
+}
+
+module.exports = renderTOC;
+`;
+
 const DEFAULT_BLOCK_TABLE = `.wp-document-content table,
 .wp-document-content table th,
 .wp-document-content table td {
@@ -534,7 +642,7 @@ const DEFAULT_MARGIN_ELEMENTS = [
   {
     id: 'wp-logo-margin',
     name: 'Logo WP',
-    code: '<img src="icon.png">',
+    code: '<img src=".mdwp/icon.png">',
     top: '37',
     right: '42',
     pagesPattern: '!first',
@@ -565,7 +673,7 @@ const DEFAULT_MARGIN_ELEMENTS = [
   {
     id: 'wp-cover-margin',
     name: 'Cover page',
-    code: '<img src="cover.png">',
+    code: '<img src=".mdwp/cover.png">',
     top: '0',
     right: '0',
     width: '100%',
@@ -575,7 +683,7 @@ const DEFAULT_MARGIN_ELEMENTS = [
   {
     id: 'wp-footer-margin',
     name: 'Final footer',
-    code: '<img src="footer-wp.png">',
+    code: '<img src=".mdwp/footer-wp.png">',
     bottom: '0',
     left: '0',
     width: '100%',
@@ -649,7 +757,7 @@ const DEFAULT_OVERLAY_TEMPLATE = `body{
     color: #002E45;
 }`;
 
-const DEFAULT_OVERLAY_MARKDOWN = `<img src="icon.png" style="max-width:40%; margin-bottom:40px; display:block; margin-left:auto; margin-right:auto;">
+const DEFAULT_OVERLAY_MARKDOWN = `<img src=".mdwp/icon.png" style="max-width:40%; margin-bottom:40px; display:block; margin-left:auto; margin-right:auto;">
 
 # FACULTAD DE CIENCIAS DE INGENIERÍA  
 # CARRERA DE TECNOLOGÍAS DE LA INFORMACIÓN Y COMUNICACIÓN EN LINEA.
@@ -698,6 +806,11 @@ function defaultCover() {
   };
 }
 
+function defaultCoverSource(cover = defaultCover()) {
+  const fallback = defaultCover();
+  return `<!-- mdwp:cover-css -->\n${cover.overlayTemplate || fallback.overlayTemplate}\n<!-- /mdwp:cover-css -->\n\n<!-- mdwp:cover-markdown -->\n${cover.overlayMarkdown || fallback.overlayMarkdown}\n<!-- /mdwp:cover-markdown -->\n`;
+}
+
 function defaultSettings() {
   return {
     pageSize: 'letter',
@@ -716,7 +829,7 @@ function defaultSettings() {
     blockStyleLists: DEFAULT_BLOCK_LISTS,
     tableCustomCss: DEFAULT_BLOCK_TABLE,
     pageNumTemplate: 'Página {page} de {total}',
-    autoNumberHeadings: true,
+    autoNumberHeadings: false,
     marginTop: 96,
     marginBottom: 96,
     marginLeft: 96,
@@ -747,15 +860,17 @@ function defaultSettings() {
   };
 }
 
-function cmdNew(name) {
-  const target = name ? path.resolve(name) : process.cwd();
-  const base = name ? path.basename(target) : path.basename(process.cwd());
-
-  if (fs.existsSync(path.join(target, 'configuracion_metadatos.json'))) {
+// Shared project writer used by `mdwp new` for both plain folders and
+// Moodle-driven projects. `opts` may carry a custom title, cover, markdown
+// body and a downloaded attachment to store in the project.
+function writeProject(target, base, opts = {}) {
+  if (fs.existsSync(path.join(target, PROJECT_DATA_DIR, MANIFEST_NAME)) || fs.existsSync(path.join(target, MANIFEST_NAME))) {
     console.error(`  → Ya existe un proyecto en: ${target}`);
     process.exit(1);
   }
   fs.mkdirSync(target, { recursive: true });
+  const dataDir = path.join(target, PROJECT_DATA_DIR);
+  fs.mkdirSync(dataDir, { recursive: true });
 
   // Copy the three images referenced by the default cover/template so the
   // generated document actually shows them (icon.png, cover.png, footer-wp.png).
@@ -764,7 +879,7 @@ function cmdNew(name) {
   for (const img of TEMPLATE_IMAGES) {
     const src = path.join(ROOT, 'public', img);
     if (fs.existsSync(src)) {
-      fs.copyFileSync(src, path.join(target, img));
+      fs.copyFileSync(src, path.join(dataDir, img));
       const buf = fs.readFileSync(src);
       const mime = img.endsWith('.png') ? 'image/png' : 'image/' + path.extname(img).slice(1);
       uploadedFiles.push({
@@ -790,27 +905,53 @@ function cmdNew(name) {
   const docxName = DOCX_REFERENCE_NAME;
   const docxCopied = fs.existsSync(DOCX_REFERENCE_SRC);
   if (docxCopied) {
-    fs.copyFileSync(DOCX_REFERENCE_SRC, path.join(target, docxName));
+    fs.copyFileSync(DOCX_REFERENCE_SRC, path.join(dataDir, docxName));
   }
 
+  // Optional downloaded attachment (e.g. the assignment PDF). Copied into the
+  // project so it stays available, and registered as an uploaded resource.
+  if (opts.attachment && opts.attachment.path && fs.existsSync(opts.attachment.path)) {
+    const attachName = 'material_' + String(opts.attachment.name || 'adjunto.pdf').replace(/[\\/]/g, '_');
+    const attachDest = path.join(dataDir, attachName);
+    fs.copyFileSync(opts.attachment.path, attachDest);
+    const buf = fs.readFileSync(attachDest);
+    const mime = attachName.toLowerCase().endsWith('.pdf')
+      ? 'application/pdf'
+      : 'application/octet-stream';
+    uploadedFiles.push({
+      id: 'attach-' + attachName,
+      name: attachName,
+      type: mime,
+      size: buf.length,
+      dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+      uploadedAt: new Date().toISOString(),
+      description: 'Documento adjunto de la tarea',
+    });
+  }
+
+  const contentTitle = opts.title || base;
   const contentPath = path.join(target, CONTENT_NAME);
-  const escapedBase = String(base).replace(/"/g, '\\"');
+  const escapedTitle = String(contentTitle).replace(/"/g, '\\"');
+  const contentBody =
+    opts.body !== undefined
+      ? String(opts.body).replace(/\s+$/, '') + '\n'
+      : `# ${base}\n\nEscribe aquí el contenido de tu documento.\n`;
   fs.writeFileSync(
     contentPath,
     [
       '---',
-      `title: "${escapedBase}"`,
+      `title: "${escapedTitle}"`,
       'format:',
       '  docx:',
-      `    reference-doc: ${DOCX_REFERENCE_NAME}`,
+      `    reference-doc: ${PROJECT_DATA_DIR}/${DOCX_REFERENCE_NAME}`,
       '  html:',
       `    css: ${STYLES_NAME}`,
+      'bibliography: bibliografia.bib',
+      'toc: true',
+      'cover: true',
       '---',
       '',
-      `# ${base}`,
-      '',
-      'Escribe aquí el contenido de tu documento.',
-      '',
+      contentBody,
     ].join('\n'),
     'utf8'
   );
@@ -818,9 +959,16 @@ function cmdNew(name) {
   const settings = defaultSettings();
   const stylesText = buildStylesFile(settings);
   fs.writeFileSync(path.join(target, STYLES_NAME), stylesText, 'utf8');
+  fs.writeFileSync(path.join(target, COVER_NAME), defaultCoverSource(opts.cover || defaultCover()), 'utf8');
+  fs.writeFileSync(path.join(dataDir, TOC_DATA_NAME), JSON.stringify(DEFAULT_TOC_JSON, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(path.join(target, TOC_ENGINE_NAME), DEFAULT_TOC_ENGINE, 'utf8');
 
   const manifest = {
-    cover: defaultCover(),
+    cover: (() => {
+      const cover = opts.cover || defaultCover();
+      const { overlayTemplate, overlayMarkdown, overlayHtml, ...coverMetadata } = cover;
+      return coverMetadata;
+    })(),
     settings,
     bibliography: [],
     bibFile: bibPath,
@@ -828,20 +976,29 @@ function cmdNew(name) {
     uploadedFiles,
     stylesFile: STYLES_NAME,
   };
-  const copiedImages = uploadedFiles.map((f) => f.name);
+  const copiedImages = uploadedFiles.filter((f) => /^image\//.test(f.type)).map((f) => f.name);
+  const copiedAttachments = uploadedFiles
+    .filter((f) => !/^image\//.test(f.type))
+    .map((f) => f.name);
 
   fs.writeFileSync(
-    path.join(target, 'configuracion_metadatos.json'),
+    path.join(dataDir, MANIFEST_NAME),
     JSON.stringify(manifest, null, 2),
     'utf8'
   );
 
   console.log(`  → Proyecto creado: ${target}`);
-  console.log(`    • configuracion_metadatos.json (portada + elementos de página)`);
-  console.log(`    • ${CONTENT_NAME} (YAML: title = "${base}", reference-doc = ${DOCX_REFERENCE_NAME}, css = ${STYLES_NAME})`);
+  console.log(`    • ${PROJECT_DATA_DIR}/${MANIFEST_NAME} (metadatos + elementos de página)`);
+  console.log(`    • ${CONTENT_NAME} (YAML: title = "${contentTitle}", reference-doc = ${DOCX_REFERENCE_NAME}, css = ${STYLES_NAME})`);
   console.log(`    • ${STYLES_NAME} (estilos externos, referenciado en el YAML)`);
+  console.log(`    • ${COVER_NAME} (CSS + Markdown de la portada)`);
+  console.log(`    • ${PROJECT_DATA_DIR}/${TOC_DATA_NAME} + ${TOC_ENGINE_NAME} (datos y generador editable de la tabla de contenidos)`);
+  console.log(`    • ${PROJECT_DATA_DIR}/ (imágenes y DOCX de referencia)`);
   if (copiedImages.length) {
     console.log(`    • ${copiedImages.join(', ')} (imágenes de plantilla copiadas)`);
+  }
+  if (copiedAttachments.length) {
+    console.log(`    • ${copiedAttachments.join(', ')} (adjunto de la tarea copiado)`);
   }
   console.log(`    • bibliografia.bib (vacío)`);
   if (docxCopied) {
@@ -850,6 +1007,56 @@ function cmdNew(name) {
     console.log(`  ⚠ No se copió ${docxName}: no existe en ${DOCX_REFERENCE_SRC}`);
   }
   console.log(`\n  Abre con: mdwp open ${target}`);
+}
+
+// Parse the arguments of `mdwp new` (everything after the command).
+function parseNewArgs(argv) {
+  const out = { attach: null, dir: null, provider: 'deepseek', thinking: false, noLlm: false, positional: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--attach') out.attach = argv[++i];
+    else if (a === '--dir') out.dir = argv[++i];
+    else if (a === '--provider') out.provider = argv[++i];
+    else if (a === '--thinking') out.thinking = true;
+    else if (a === '--no-llm') out.noLlm = true;
+    else out.positional.push(a);
+  }
+  return out;
+}
+
+async function cmdNewFromMoodle(url, opts) {
+  const moodle = require('./wp-moodle.cjs');
+  const prep = await moodle.prepareAssignment(url, {
+    attach: opts.attach,
+    noLlm: opts.noLlm,
+    provider: opts.provider,
+    thinking: opts.thinking,
+  });
+  const target = opts.dir
+    ? path.resolve(opts.dir)
+    : path.resolve(prep.base);
+  writeProject(target, prep.base, {
+    title: prep.activityName,
+    cover: prep.cover,
+    body: prep.body,
+    attachment: prep.attachment,
+  });
+  console.log(`    • Tema: ${prep.activityName}`);
+  console.log(`    • Curso: ${prep.course}  ·  Docente: ${prep.teacher}`);
+  console.log(`    • Grupo: ${prep.members.join(', ')}`);
+  console.log(`    • Periodo: ${prep.period}  ·  Fecha: ${prep.date}`);
+  return target;
+}
+
+async function cmdNew(targetArg, opts) {
+  const moodle = require('./wp-moodle.cjs');
+  if (targetArg && moodle.isMoodleUrl(targetArg)) {
+    return cmdNewFromMoodle(targetArg, opts);
+  }
+  const target = targetArg ? path.resolve(targetArg) : process.cwd();
+  const base = targetArg ? path.basename(target) : path.basename(process.cwd());
+  writeProject(target, base, {});
+  return target;
 }
 
 function cmdOpen(folder) {
@@ -876,9 +1083,12 @@ async function main() {
   const folder = projectFolder(tail);
 
   switch (cmd) {
-    case 'new':
-      cmdNew(tail);
+    case 'new': {
+      const opts = parseNewArgs(process.argv.slice(3));
+      const targetArg = opts.positional[0] || null;
+      await cmdNew(targetArg, opts);
       break;
+    }
 
     case 'open':
       cmdOpen(folder);

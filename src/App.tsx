@@ -14,9 +14,9 @@ import { getAllUploadedFiles, saveUploadedFilesToDB, clearAllUploadedFilesDB } f
 import { BibliographyDrawer } from './components/BibliographyDrawer';
 import { MarginsDrawer } from './components/MarginsDrawer';
 import { parseBibtex, generateBibtexFromItems } from './utils/bibParser';
-import { Layers, Sliders, Image, Upload, Printer, Trash2, Code, ChevronDown, BookOpen, RefreshCw, FolderArchive, Maximize2, Layout, ChevronLeft, ChevronRight, Key, X, List, Grid, AlertTriangle, CheckCircle, Globe, Save } from 'lucide-react';
+import { Sliders, Image, Upload, Printer, Trash2, Code, ChevronDown, BookOpen, RefreshCw, FolderArchive, Maximize2, Layout, ChevronLeft, ChevronRight, Key, X, List, Grid, AlertTriangle, CheckCircle, Globe, Save } from 'lucide-react';
 import { TemplatesDrawer } from './components/TemplatesDrawer';
-import { extractCoverCss, compileCoverHtml, getYamlCssSources } from './utils/markdownParser';
+import { extractCoverCss, compileCoverHtml, getYamlCssSources, parseYamlFrontMatter, parseCoverSource } from './utils/markdownParser';
 import { buildStandaloneHtml } from './lib/standaloneHtml';
 import { parseStylesFile, buildStylesFile, STYLES_SECTIONS, STYLES_FILE_NAME } from './lib/stylesSheet';
 import { useLanguage } from './i18n/LanguageContext';
@@ -46,6 +46,15 @@ declare global {
 interface CompileQuery {
   mode?: string;
   server?: string;
+}
+
+function parseYamlBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return undefined;
 }
 
 
@@ -284,7 +293,7 @@ const DEFAULT_MARGIN_ELEMENTS = [
   {
     id: 'wp-logo-margin',
     name: 'Logo WP',
-    code: '<img src="icon.png">',
+    code: '<img src=".mdwp/icon.png">',
     top: '37',
     right: '42',
     pagesPattern: '!first',
@@ -315,7 +324,7 @@ const DEFAULT_MARGIN_ELEMENTS = [
   {
     id: 'wp-cover-margin',
     name: 'Cover page',
-    code: '<img src="cover.png">',
+    code: '<img src=".mdwp/cover.png">',
     top: '0',
     right: '0',
     width: '100%',
@@ -325,7 +334,7 @@ const DEFAULT_MARGIN_ELEMENTS = [
   {
     id: 'wp-footer-margin',
     name: 'Final footer',
-    code: '<img src="footer-wp.png">',
+    code: '<img src=".mdwp/footer-wp.png">',
     bottom: '0',
     left: '0',
     width: '100%',
@@ -399,7 +408,7 @@ const DEFAULT_OVERLAY_TEMPLATE = `body{
     color: #002E45;
 }`;
 
-const DEFAULT_OVERLAY_MARKDOWN = `<img src="icon.png" style="max-width:40%; margin-bottom:40px; display:block; margin-left:auto; margin-right:auto;">
+const DEFAULT_OVERLAY_MARKDOWN = `<img src=".mdwp/icon.png" style="max-width:40%; margin-bottom:40px; display:block; margin-left:auto; margin-right:auto;">
 
 # FACULTAD DE CIENCIAS DE INGENIERÍA  
 # CARRERA DE TECNOLOGÍAS DE LA INFORMACIÓN Y COMUNICACIÓN EN LINEA.
@@ -428,6 +437,83 @@ Abril 2026 - Julio 2026
 <br>
 
 # MILAGRO-ECUADOR`;
+
+/** Collect relative image paths referenced in markdown/HTML content. */
+function collectLocalImageRefs(content: string): string[] {
+  const found = new Set<string>();
+  const consider = (raw: string) => {
+    const src = String(raw || '').trim().replace(/^<|>$/g, '').replace(/^['"]|['"]$/g, '');
+    if (!src || /^(?:https?:|data:|blob:|file:|\/\/)/i.test(src)) return;
+    if (src.startsWith('#')) return;
+    found.add(src.replace(/^\.\//, ''));
+  };
+  for (const m of content.matchAll(/src\s*=\s*["']([^"']+)["']/gi)) consider(m[1]);
+  for (const m of content.matchAll(/!\[[^\]]*]\(\s*<?([^)\s>]+)>?/g)) consider(m[1]);
+  return Array.from(found);
+}
+
+function mimeFromImagePath(filePath: string): string {
+  const ext = (filePath.split('.').pop() || '').toLowerCase();
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'svg') return 'image/svg+xml';
+  if (ext === 'bmp') return 'image/bmp';
+  return 'image/png';
+}
+
+/**
+ * Fetch project-local images referenced by the content and return UploadedFile
+ * entries so the paginator can measure real heights (relative paths 404 under /app/).
+ */
+async function loadReferencedLocalImages(
+  content: string,
+  serverBase: string,
+  existing: UploadedFile[]
+): Promise<UploadedFile[]> {
+  const base = serverBase.replace(/\/$/, '');
+  const have = new Set(
+    existing.flatMap((f) => {
+      const name = f.name.replace(/\\/g, '/');
+      return [name, name.split('/').pop() || name];
+    })
+  );
+  const extras: UploadedFile[] = [];
+  for (const ref of collectLocalImageRefs(content)) {
+    const norm = ref.replace(/\\/g, '/');
+    const baseName = norm.split('/').pop() || norm;
+    if (have.has(norm) || have.has(baseName)) continue;
+    try {
+      const url = `${base}/${norm.split('/').map(encodeURIComponent).join('/')}`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const buf = await res.arrayBuffer();
+      const mime = res.headers.get('content-type') || mimeFromImagePath(norm);
+      if (!String(mime).startsWith('image/')) continue;
+      let binary = '';
+      const bytes = new Uint8Array(buf);
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      }
+      const dataUrl = `data:${mime};base64,${btoa(binary)}`;
+      extras.push({
+        id: `local-${norm}`,
+        name: norm,
+        type: mime,
+        size: bytes.length,
+        dataUrl,
+        uploadedAt: new Date().toISOString(),
+        description: 'Imagen local del proyecto',
+      });
+      have.add(norm);
+      have.add(baseName);
+    } catch {
+      /* skip missing / unreadable */
+    }
+  }
+  return extras;
+}
 
 export default function App() {
   const { language, setLanguage, toggleLanguage, t } = useLanguage();
@@ -507,6 +593,8 @@ export default function App() {
           autoRefreshFile: true,
           showTOC: false,
           tocTitle: 'Tabla de Contenidos',
+          tocLevels: [1, 2],
+          manualTOCEntries: [],
           blockStyleTitles: DEFAULT_BLOCK_TITLES,
           blockStyleHeader: DEFAULT_BLOCK_HEADER,
           blockStyleFooter: DEFAULT_BLOCK_FOOTER,
@@ -515,7 +603,7 @@ export default function App() {
           blockStyleLists: DEFAULT_BLOCK_LISTS,
           tableCustomCss: DEFAULT_BLOCK_TABLE,
           pageNumTemplate: 'Página {page} de {total}',
-          autoNumberHeadings: true,
+          autoNumberHeadings: false,
           marginTop: 96,
           marginBottom: 96,
           marginLeft: 96,
@@ -556,6 +644,8 @@ export default function App() {
       autoRefreshFile: true, // Auto polls /content.html unless locally edited
       showTOC: false,
       tocTitle: 'Tabla de Contenidos',
+      tocLevels: [1, 2],
+      manualTOCEntries: [],
       blockStyleTitles: DEFAULT_BLOCK_TITLES,
       blockStyleHeader: DEFAULT_BLOCK_HEADER,
       blockStyleFooter: DEFAULT_BLOCK_FOOTER,
@@ -564,7 +654,7 @@ export default function App() {
       blockStyleLists: DEFAULT_BLOCK_LISTS,
       tableCustomCss: DEFAULT_BLOCK_TABLE,
       pageNumTemplate: 'Página {page} de {total}',
-      autoNumberHeadings: true,
+      autoNumberHeadings: false,
       h1LineBreak: true,
       h2LineBreak: true,
       h3LineBreak: true,
@@ -789,6 +879,29 @@ export default function App() {
 
   const bridge = (window as any).wpBridge;
 
+  // Keep document state aligned with the YAML front matter of the content file
+  // (`cover:`, `toc:`, and `bibliography:`), so those fields are the single
+  // source of truth even though the graphic toggles were removed.
+  useEffect(() => {
+    const yaml = parseYamlFrontMatter(contentText || '');
+    const yamlCover = parseYamlBoolean(yaml.cover);
+    if (yamlCover !== undefined) {
+      setCover((prev) => ({ ...prev, enabled: yamlCover }));
+    }
+    if (yaml.toc !== undefined) {
+      setSettings((prev) => ({ ...prev, showTOC: yaml.toc === 'true' || yaml.toc === true }));
+    }
+    if (typeof yaml.bibliography === 'string' && yaml.bibliography.trim()) {
+      const bibName = yaml.bibliography.trim().replace(/^['"]|['"]$/g, '');
+      if (projectFolder && !bibName.includes('/') && !bibName.includes('\\')) {
+        setBibPath(projectFolder.replace(/[\\/]+$/, '') + '/' + bibName);
+      } else {
+        setBibPath(bibName);
+      }
+      setSettings((prev) => ({ ...prev, showBibliography: true }));
+    }
+  }, [contentText, projectFolder]);
+
   // On mount in Electron edit-mode: load the project folder that the CLI opened
   useEffect(() => {
     let cancelled = false;
@@ -858,6 +971,18 @@ export default function App() {
       }
       if (data.manifest.bibliography) setBibliography(data.manifest.bibliography);
       if (data.manifest.uploadedFiles) setUploadedFiles(data.manifest.uploadedFiles);
+    }
+    if (typeof data.coverText === 'string' && data.coverText.trim()) {
+      const source = parseCoverSource(data.coverText);
+      setCover((prev) => {
+        const next = {
+          ...prev,
+          overlayTemplate: source.css || DEFAULT_OVERLAY_TEMPLATE,
+          overlayMarkdown: source.markdown || DEFAULT_OVERLAY_MARKDOWN,
+        };
+        next.overlayHtml = compileCoverHtml(next.overlayTemplate, next.overlayMarkdown);
+        return next;
+      });
     }
     if (data.bibtex !== undefined && data.bibtex !== null) {
       setBibtex(data.bibtex);
@@ -952,26 +1077,13 @@ export default function App() {
     }
   };
 
-  const handlePickBib = async () => {
-    if (!bridge || !projectFolder) return;
-    const filePath = await bridge.pickBib();
-    if (!filePath) return;
-    setBibPath(filePath);
-    try {
-      const text = await bridge.readFile(filePath);
-      setBibtex(text || '');
-    } catch (e) {
-      console.error('Error reading bibliography file:', e);
-    }
-  };
-
   const handleSaveProject = async () => {
     if (!bridge || !projectFolder) return;
     try {
       const res = await bridge.writeFolder({
         folder: projectFolder,
         manifest: {
-          cover,
+          cover: (({ overlayTemplate, overlayMarkdown, overlayHtml, ...metadata }) => metadata)(cover),
           settings,
           uploadedFiles,
           htmlBlocks,
@@ -980,7 +1092,7 @@ export default function App() {
           stylesFile: STYLES_FILE_NAME,
         },
         // contentPath/contentText are intentionally omitted: in the desktop
-        // app the content file (contenido_fuente.qmd) is edited externally and
+        // app the content file (contenido_fuente.md) is edited externally and
         // must never be overwritten by a stale in-memory snapshot on Save.
         bibtex,
         images: uploadedFiles,
@@ -1016,7 +1128,7 @@ export default function App() {
   // Heading level edits from the TOC drawer are written back to the qmd file.
   const handleUpdateHeadingSource = (next: string) => {
     setContentText(next);
-    const filePath = contentPath || (projectFolder ? `${projectFolder}/contenido_fuente.qmd` : null);
+    const filePath = contentPath || (projectFolder ? `${projectFolder}/contenido_fuente.md` : null);
     if (bridge && filePath) {
       bridge.writeContent({ filePath, text: next })
         .then((res: any) => {
@@ -1097,10 +1209,12 @@ export default function App() {
   }, [contentText, projectFolder]);
 
   const runHeadlessCompile = async (mode: string, server: string | null) => {
+    let loadedContent = '';
     try {
       if (server) {
         const base = server.replace(/\/$/, '');
-        const manifestRes = await fetch(base + '/configuracion_metadatos.json');
+        let manifestRes = await fetch(base + '/.mdwp/configuracion_metadatos.json');
+        if (!manifestRes.ok) manifestRes = await fetch(base + '/configuracion_metadatos.json');
         let manifest = {};
         if (manifestRes.ok) {
           try {
@@ -1127,9 +1241,26 @@ export default function App() {
               return c;
             });
           }
+          try {
+            const coverRes = await fetch(base + '/portada.md');
+            if (coverRes.ok) {
+              const source = parseCoverSource(await coverRes.text());
+              setCover((prev) => {
+                const next = {
+                  ...prev,
+                  overlayTemplate: source.css || DEFAULT_OVERLAY_TEMPLATE,
+                  overlayMarkdown: source.markdown || DEFAULT_OVERLAY_MARKDOWN,
+                };
+                next.overlayHtml = compileCoverHtml(next.overlayTemplate, next.overlayMarkdown);
+                return next;
+              });
+            }
+          } catch (e) {
+            console.warn('Could not load portada.md:', e);
+          }
           if (m.settings) setSettings((prev) => ({ ...prev, ...m.settings, autoRefreshFile: true }));
           if (m.bibliography) setBibliography(m.bibliography);
-          if (m.uploadedFiles) setUploadedFiles(m.uploadedFiles);
+          let nextUploaded: UploadedFile[] = Array.isArray(m.uploadedFiles) ? m.uploadedFiles : [];
           if (m.htmlBlocks) setHtmlBlocks(m.htmlBlocks);
           // The external styles sheet (documento-estilos.css, referenced in the
           // YAML) wins over the manifest mirror, so `mdwp build` renders with
@@ -1156,47 +1287,85 @@ export default function App() {
           } catch (e) {
             /* ignore missing styles file */
           }
-        }
-        // Fetch content file (try to use the one the CLI tells us via content file name).
-        // Fall back to the legacy .md name for projects created before .qmd.
-        const contentNames = [
-          (manifest as any)?.contentFile?.split(/[\\/]/).pop() || 'contenido_fuente.qmd',
-          'contenido_fuente.md',
-        ];
-        for (const contentName of [...new Set(contentNames)]) {
-          const contentRes = await fetch(base + '/' + encodeURIComponent(contentName));
-          if (contentRes.ok) {
-            const text = await contentRes.text();
-            if (text) {
-              setContentText(text);
-              setContentPath(contentName);
-              await loadExternalStyles(text, base);
-              break;
+          // Fetch content file (try to use the one the CLI tells us via content file name).
+          // Prefer the default .md name; fall back to the manifest's content file
+          // (which may be a custom or legacy .qmd name) for older projects.
+          const contentNames = [
+            'contenido_fuente.md',
+            (manifest as any)?.contentFile?.split(/[\\/]/).pop() || 'contenido_fuente.qmd',
+            'contenido_fuente.qmd',
+          ];
+          loadedContent = '';
+          let loadedContentName = '';
+          for (const contentName of [...new Set(contentNames)]) {
+            const contentRes = await fetch(base + '/' + encodeURIComponent(contentName));
+            if (contentRes.ok) {
+              const text = await contentRes.text();
+              if (text) {
+                loadedContent = text;
+                loadedContentName = contentName;
+                break;
+              }
             }
           }
-        }
-        // Fetch bibliography (.bib) file, falling back to the parsed array.
-        const bibName = (manifest as any)?.bibFile?.split(/[\\/]/).pop() || 'bibliografia.bib';
-        try {
-          const bibRes = await fetch(base + '/' + encodeURIComponent(bibName));
-          if (bibRes.ok) {
-            const text = await bibRes.text();
-            if (text) setBibtex(text);
+          // Inline project images (e.g. evidencias/*.png) BEFORE setting content
+          // so the first pagination pass measures real heights (relative paths
+          // 404 under /app/ and would otherwise pack unloaded images together).
+          if (loadedContent) {
+            const extras = await loadReferencedLocalImages(loadedContent, base, nextUploaded);
+            if (extras.length > 0) nextUploaded = [...nextUploaded, ...extras];
           }
-        } catch (e) {
-          /* ignore missing bib file */
+          setUploadedFiles(nextUploaded);
+          setCompiledUploadedFiles(nextUploaded);
+          if (loadedContent) {
+            setContentText(loadedContent);
+            setContentPath(loadedContentName);
+            setCompiledHtmlContent(loadedContent);
+            await loadExternalStyles(loadedContent, base);
+          }
+          // Honor project YAML flags: `cover:` toggles the mdwp cover page,
+          // `toc:` drives the TOC pages, and `bibliography:` chooses the .bib file.
+          const contentYaml = parseYamlFrontMatter(loadedContent || '');
+          const yamlCover = parseYamlBoolean(contentYaml.cover);
+          if (yamlCover !== undefined) {
+            setCover((prev) => ({ ...prev, enabled: yamlCover }));
+          }
+          const yamlToc = contentYaml.toc;
+          if (yamlToc !== undefined) {
+            setSettings((prev) => ({ ...prev, showTOC: yamlToc === 'true' || yamlToc === true }));
+          }
+          const yamlBibName =
+            typeof contentYaml.bibliography === 'string' && contentYaml.bibliography.trim()
+              ? contentYaml.bibliography.trim().replace(/^['"]|['"]$/g, '')
+              : null;
+          if (yamlBibName) {
+            setBibPath(yamlBibName);
+            setSettings((prev) => ({ ...prev, showBibliography: true }));
+          }
+          // Fetch bibliography (.bib) file, falling back to the parsed array.
+          const bibName = yamlBibName || (manifest as any)?.bibFile?.split(/[\\/]/).pop() || 'bibliografia.bib';
+          try {
+            const bibRes = await fetch(base + '/' + encodeURIComponent(bibName));
+            if (bibRes.ok) {
+              const text = await bibRes.text();
+              if (text) setBibtex(text);
+            }
+          } catch (e) {
+            /* ignore missing bib file */
+          }
         }
       }
 
       // Persist the compiled output after pagination settles
-      await persistCompiledDocument(mode, server);
+      const hasSourceContent = Boolean(loadedContent && loadedContent.trim().length > 0);
+      await persistCompiledDocument(mode, server, hasSourceContent);
     } catch (e) {
       console.error('Headless compile error:', e);
       window.__wpCompileDone?.();
     }
   };
 
-  const persistCompiledDocument = async (mode: string, server: string | null) => {
+  const persistCompiledDocument = async (mode: string, server: string | null, hasSourceContent?: boolean) => {
     const currentCover = coverRef.current || cover;
     const currentSettings = settingsRef.current || settings;
     const hasCover = currentSettings.pageSize !== 'continuous' && currentCover.enabled !== false;
@@ -1206,12 +1375,17 @@ export default function App() {
     let stableTicks = 0;
     while (Date.now() - started < maxWait) {
       const currentPageCount = pageCountRef.current;
-      const pages = document.querySelectorAll('[name^="document-page-"]');
-      const textLen = (document.querySelector('.wp-document-content')?.textContent || '').length;
-      const hasContent = textLen > 0 || currentPageCount > 0;
+      const isRecalculating = Boolean((window as any).__wpRecalculating);
+      const pageBodies = document.querySelectorAll('.wp-document-body');
+      const hasRenderedBody = Array.from(pageBodies).some((b) => (b.textContent || '').trim().length > 0);
+      const hiddenMeasure = document.querySelector('.wp-document-content');
+      const sourceTextPresent = hasSourceContent ?? ((hiddenMeasure?.textContent || '').trim().length > 0);
+      const hasContentReady = !sourceTextPresent || hasRenderedBody;
       const covEl = document.getElementById('wp-cover-page');
       const hasCoverReady = !hasCover || (covEl ? covEl.textContent.trim().length > 3 : false);
-      if (hasContent && hasCoverReady && currentPageCount === lastPageCount && currentPageCount > 0) {
+      const isReady = hasContentReady && hasCoverReady && !isRecalculating && currentPageCount > 0;
+
+      if (isReady && currentPageCount === lastPageCount) {
         stableTicks += 1;
         if (stableTicks >= 3) break;
       } else {
@@ -1223,6 +1397,26 @@ export default function App() {
 
     await new Promise((r) => setTimeout(r, 800));
 
+    // Mermaid SVGs are inserted into the visible paginated pages by the preview
+    // renderer after pagination. Wait for that render before serializing so the
+    // standalone HTML contains diagrams rather than their source text.
+    if (document.querySelector('.wp-document-content .mermaid')) {
+      const mermaidDeadline = Date.now() + 10000;
+      while (!(window as any).mermaid && Date.now() < mermaidDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const mermaid = (window as any).mermaid;
+      if (mermaid) {
+        try {
+          mermaid.initialize({ startOnLoad: false, theme: 'default' });
+          await mermaid.run({ querySelector: '.wp-document-content .mermaid:not([data-processed])' });
+        } catch (e) {
+          console.error('Mermaid export render error:', e);
+        }
+      }
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+
     // Serialize the paginated DOM into a standalone HTML document
     const html = await captureStandaloneHtml();
     if (!html) {
@@ -1232,10 +1426,50 @@ export default function App() {
 
     if (server) {
       try {
+        const tocPages = Array.from(document.querySelectorAll<HTMLElement>('[data-mdwp-toc-slot]'))
+          .sort((a, b) => Number(a.dataset.mdwpTocSlot) - Number(b.dataset.mdwpTocSlot))
+          .map((slot) => ({
+            page: Number(slot.dataset.mdwpTocPage) || 1,
+            titles: Array.from(slot.querySelectorAll<HTMLElement>('.toc-item')).map((item) => {
+              const title = item.querySelector('.toc-title')?.textContent?.trim() || '';
+              const page = item.querySelector('.toc-page')?.textContent?.trim() || '';
+              const levelClass = Array.from(item.classList).find((name) => name.startsWith('toc-level-'));
+              return {
+                title,
+                page: Number.parseInt(page, 10) || 1,
+                level: levelClass ? Number.parseInt(levelClass.slice('toc-level-'.length), 10) || 1 : 1,
+              };
+            }),
+          }));
+        const inlineTOCs = Array.from(document.querySelectorAll<HTMLElement>('[data-mdwp-toc-inline]'))
+          .filter((slot) => Boolean(slot.closest<HTMLElement>('[name^="document-page-"]')))
+          .map((slot) => {
+            const pageName = slot.closest<HTMLElement>('[name^="document-page-"]')?.getAttribute('name') || '';
+            const page = Number.parseInt(pageName.replace('document-page-', ''), 10) || 1;
+            return {
+              slot: Number(slot.dataset.mdwpTocInline) || 0,
+              page,
+              titles: Array.from(slot.querySelectorAll<HTMLElement>('.toc-item')).map((item) => {
+                const title = item.querySelector('.toc-title')?.textContent?.trim() || '';
+                const pageText = item.querySelector('.toc-page')?.textContent?.trim() || '';
+                const levelClass = Array.from(item.classList).find((name) => name.startsWith('toc-level-'));
+                return {
+                  title,
+                  page: Number.parseInt(pageText, 10) || 1,
+                  level: levelClass ? Number.parseInt(levelClass.slice('toc-level-'.length), 10) || 1 : 1,
+                };
+              }),
+            };
+          });
+        const toc = {
+          title: currentSettings.tocTitle || 'Tabla de Contenidos',
+          pages: tocPages,
+          inline: inlineTOCs,
+        };
         await fetch(server.replace(/\/$/, '') + '/__output', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ html, mode }),
+          body: JSON.stringify({ html, mode, toc }),
         });
       } catch (e) {
         console.error('Error posting output:', e);
@@ -1370,7 +1604,8 @@ export default function App() {
     if (activeUploadedFiles.length > 0) {
       activeUploadedFiles.forEach((file) => {
         if (file && file.dataUrl && file.name) {
-          html = html.replaceAll(file.dataUrl, file.name);
+          const imagePath = file.id?.startsWith('local-') ? file.name : `.mdwp/${file.name}`;
+          html = html.replaceAll(file.dataUrl, imagePath);
         }
       });
     }
@@ -3321,31 +3556,6 @@ read -p "Presione [Enter] para salir..."`;
             {/* 1. Left Toolbar Sidebar (Narrow vertical navigation bar with stacked buttons) */}
             <div className="w-[76px] shrink-0 bg-slate-950 border-r border-slate-800/80 flex flex-col items-center py-4 gap-3 h-full print:hidden select-none animate-fade-in">
               <button
-                disabled={settings.pageSize === 'continuous'}
-                onClick={() => {
-                  if (activeDrawerType === 'cover') {
-                    setActiveDrawerType(null);
-                  } else {
-                    setActiveDrawerType('cover');
-                  }
-                }}
-                className={`w-16 h-16 rounded-lg flex flex-col items-center justify-center gap-1 transition-all text-center relative ${
-                  settings.pageSize === 'continuous'
-                    ? 'opacity-30 cursor-not-allowed text-slate-600'
-                    : activeDrawerType === 'cover'
-                      ? 'bg-[#004080] text-white border border-[#FF6600]/80 shadow-[0_0_12px_rgba(255,102,0,0.15)] cursor-pointer'
-                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 cursor-pointer'
-                }`}
-                title={settings.pageSize === 'continuous' ? t('navCoverDisabledContinuous') : cover.enabled === false ? t('navCoverDeactivated') : t('navCoverConfig')}
-              >
-                <Layers className="w-5 h-5 shrink-0" />
-                <span className="text-[9px] font-bold tracking-tight leading-tight mt-0.5">{t('navCover')}</span>
-                {cover.enabled === false && settings.pageSize !== 'continuous' && (
-                  <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-500 border border-slate-950" title={t('navCoverDeactivated')} />
-                )}
-              </button>
-
-              <button
                 onClick={() => setActiveDrawerType(null)}
                 className={`w-16 h-16 rounded-lg flex flex-col items-center justify-center gap-1 transition-all text-center cursor-pointer ${
                   activeDrawerType === null
@@ -3483,11 +3693,9 @@ read -p "Presione [Enter] para salir..."`;
                   projectFolder={projectFolder}
                   contentPath={contentPath}
                   contentText={contentText}
-                  bibPath={bibPath}
                   showContentInPreview={showContentInPreview}
                   onPickFolder={handlePickFolder}
                   onPickFile={handlePickFile}
-                  onPickBib={handlePickBib}
                   onToggleShowContent={handleToggleShowContent}
                   onSaveProject={handleSaveProject}
                   onLoadContentText={(text) => setContentText(text)}
@@ -3505,8 +3713,6 @@ read -p "Presione [Enter] para salir..."`;
                   onToggleShowBibliography={(show) => setSettings(prev => ({ ...prev, showBibliography: show }))}
                   showOnlyCitedBibliography={!!settings.showOnlyCitedBibliography}
                   onToggleShowOnlyCitedBibliography={(show) => setSettings(prev => ({ ...prev, showOnlyCitedBibliography: show }))}
-                  bibliographyTitle={settings.bibliographyTitle || 'Referencias Bibliográficas'}
-                  onChangeBibliographyTitle={(title) => setSettings(prev => ({ ...prev, bibliographyTitle: title }))}
                   onInsertHTML={handleInsertHTML}
                   pageSize={settings.pageSize}
                 />
@@ -3540,6 +3746,7 @@ read -p "Presione [Enter] para salir..."`;
                   userApiKey={userApiKey}
                   markdownSource={contentText}
                   onMarkdownSourceChange={handleUpdateHeadingSource}
+                  debounceDelay={staticSyncDelay}
                 />
               )}
             </div>
@@ -3780,4 +3987,3 @@ read -p "Presione [Enter] para salir..."`;
     </div>
   );
 }
-

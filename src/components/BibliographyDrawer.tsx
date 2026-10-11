@@ -27,8 +27,6 @@ interface BibliographyDrawerProps {
   onToggleShowBibliography: (show: boolean) => void;
   showOnlyCitedBibliography: boolean;
   onToggleShowOnlyCitedBibliography: (show: boolean) => void;
-  bibliographyTitle: string;
-  onChangeBibliographyTitle: (title: string) => void;
   pageSize?: string;
 }
 
@@ -41,8 +39,6 @@ export function BibliographyDrawer({
   onToggleShowBibliography,
   showOnlyCitedBibliography,
   onToggleShowOnlyCitedBibliography,
-  bibliographyTitle,
-  onChangeBibliographyTitle,
   pageSize
 }: BibliographyDrawerProps) {
   const { language, t } = useLanguage();
@@ -146,19 +142,6 @@ export function BibliographyDrawer({
                 >
                   {showOnlyCitedBibliography ? (language === 'es' ? 'SÍ (SOLO CITADAS)' : 'YES (ONLY CITED)') : (language === 'es' ? 'TODAS' : 'ALL')}
                 </button>
-              </div>
-
-              <div className="flex flex-col gap-1 border-t border-slate-905/30 pt-2.5">
-                <label className="text-[8.5px] text-slate-400 font-bold uppercase">
-                  {t('bibSectionTitleLabel')}
-                </label>
-                <input
-                  type="text"
-                  value={bibliographyTitle}
-                  onChange={(e) => onChangeBibliographyTitle(e.target.value)}
-                  className="p-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200 text-xs focus:border-[#FF6600] focus:outline-none"
-                  placeholder={language === 'es' ? "Ej: Referencias Bibliográficas" : "e.g.: References"}
-                />
               </div>
             </>
           )}

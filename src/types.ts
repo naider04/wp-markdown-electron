@@ -42,6 +42,11 @@ export interface PageSettings {
   autoRefreshFile: boolean;
   showTOC?: boolean;
   tocTitle?: string;
+  tocLevels?: number[];
+  // Entradas manuales del índice: títulos ocultos (no existen como encabezado
+  // real en el contenido) con la página absoluta donde aparecen, para que se
+  // muestren en el TOC sin ensuciar el documento (p. ej. "Línea de Tiempo").
+  manualTOCEntries?: { title: string; page: number; level?: number }[];
   blockStyleTitles?: string;
   blockStyleHeader?: string;
   blockStyleFooter?: string;
