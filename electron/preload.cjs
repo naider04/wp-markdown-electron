@@ -12,7 +12,8 @@ contextBridge.exposeInMainWorld('wpBridge', {
   writeFolder: (payload) => ipcRenderer.invoke('project:writeFolder', payload),
   saveBuiltHtml: (payload) => ipcRenderer.invoke('project:saveBuiltHtml', payload),
   readBuiltHtml: (folder) => ipcRenderer.invoke('project:readBuiltHtml', folder),
-  openBuiltHtml: (folder) => ipcRenderer.invoke('project:openBuiltHtml', folder),
+  openBuiltHtml: (folder) => ipcRenderer.invoke("project:openBuiltHtml", folder),
+  readTocEngine: (project) => ipcRenderer.invoke("project:readTocEngine", project),
   onProjectChanged: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('project:changed', handler);

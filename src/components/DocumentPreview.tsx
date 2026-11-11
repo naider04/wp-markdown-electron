@@ -5,6 +5,7 @@
 
 import React, { useRef, useState, useEffect } from 'react';
 import { markdownParser } from '../utils/markdownParser';
+import { deriveMetrics, waitForPreviewPagination, type TocEngineInfo, type TocMetrics } from '../utils/tocMetrics';
 import katex from 'katex';
 import { mathmlToOmml } from '../lib/ommlConverter';
 import { CoverConfig, PageSettings, UploadedFile, HTMLBlock, BibliographyItem } from '../types';
@@ -89,7 +90,9 @@ function resolveMeasureImageSrc(src: string, serverBase: string | null): string 
   if (!src || /^(?:https?:|data:|blob:|file:|\/\/)/i.test(src)) return src;
   if (!serverBase) return src;
   const cleaned = src.replace(/^\.\//, '').replace(/^\/+/, '');
-  return `${serverBase}/${cleaned.split('/').map(encodeURIComponent).join('/')}`;
+  let decoded = cleaned;
+  try { decoded = decodeURIComponent(cleaned); } catch (e) { /* keep as-is */ }
+  return `${serverBase}/${decoded.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 function inlineProjectImages(html: string, files: UploadedFile[]): string {
@@ -357,7 +360,7 @@ function renderMathInHtml(html: string, isContinuous = false): string {
       const parent = node.parentElement;
       if (parent) {
         const tagName = parent.tagName.toUpperCase();
-        if (['CODE', 'PRE', 'SCRIPT', 'STYLE', 'TEXTAREA'].includes(tagName)) {
+        if (['CODE', 'PRE', 'SCRIPT', 'STYLE', 'TEXTAREA'].includes(tagName) || parent.closest('.katex')) {
           return;
         }
         
@@ -698,6 +701,11 @@ function compileAndProcessMarkdown(
     }
   });
 
+  // Markdown tables are parsed separately from the main document when needed
+  // for table captions. Math placeholders inside those cells can survive that
+  // parse path, so render any remaining delimiters in the completed HTML.
+  resultHtml = renderMathInHtml(resultHtml, isContinuous);
+
   return resultHtml;
 }
 
@@ -787,7 +795,7 @@ async function renderMermaidBlocksInText(text: string): Promise<string> {
       const { svg } = await w.mermaid.render(id, code);
       blocks.push({
         from: m[0],
-        to: `<div class="mermaid" data-processed="true" style="display:flex;justify-content:center;margin:16px 0;max-width:100%;overflow:visible;">${svg}</div>`,
+        to: `<div class="mermaid" data-processed="true">${svg}</div>`,
       });
     } catch (e) {
       console.warn('Mermaid render error:', e);
@@ -839,10 +847,54 @@ export default function DocumentPreview({
   const [paginatedPages, setPaginatedPages] = useState<string[][]>([]);
   const [paginatedTOCPages, setPaginatedTOCPages] = useState<HeadingItem[][]>([]);
   const [zoom, setZoom] = useState<number>(100);
-  const [recalculating, setRecalculating] = useState<boolean>(false);
+  const [recalculating, setRecalculating] = useState<boolean>(true);
+  const compileServerBase = getCompileServerBase();
+  const tocSource = bridge?.readTocEngine && projectFolder ? projectFolder : compileServerBase;
+  const [tocEngine, setTocEngine] = useState<{ source: string | null; info: TocEngineInfo | null } | null>(null);
+  const [tocMetrics, setTocMetrics] = useState<TocMetrics | null>(null);
+  const tocEngineReady = tocEngine !== null && tocEngine.source === (tocSource ?? null);
+
   useEffect(() => {
-    (window as any).__wpRecalculating = recalculating;
-  }, [recalculating]);
+    let cancelled = false;
+    let request = 0;
+    const reload = async () => {
+      const currentRequest = ++request;
+      paginationTokenRef.current += 1;
+      (window as any).__wpTocEnginePending = true;
+      (window as any).__wpRecalculating = true;
+      setRecalculating(true);
+      setTocEngine(null);
+      setTocMetrics(null);
+      let info: TocEngineInfo | null = null;
+      try {
+        if (bridge?.readTocEngine && projectFolder) {
+          info = await bridge.readTocEngine(projectFolder);
+        } else if (compileServerBase) {
+          const response = await fetch(`${compileServerBase}/__toc-engine`, { cache: 'no-store' });
+          if (!response.ok) throw new Error(`TOC engine request failed: ${response.status}`);
+          info = await response.json();
+        }
+        if (info?.error) console.warn('TOC engine:', info.error);
+      } catch (error) {
+        console.warn('Could not load TOC engine; using renderer DOM measurements.', error);
+      }
+      if (!cancelled && currentRequest === request) {
+        setTocEngine({ source: tocSource ?? null, info });
+      }
+    };
+    void reload();
+    const unsubscribe = bridge?.onProjectChanged?.(() => { void reload(); });
+    return () => {
+      cancelled = true;
+      request += 1;
+      unsubscribe?.();
+    };
+  }, [bridge, projectFolder, compileServerBase, tocSource]);
+
+  useEffect(() => {
+    (window as any).__wpTocEnginePending = !tocEngineReady;
+    (window as any).__wpRecalculating = recalculating || !tocEngineReady;
+  }, [recalculating, tocEngineReady]);
   const [dynamicHeadings, setDynamicHeadings] = useState<HeadingItem[]>([]);
 
   const renderPageHTML = (html: string) => {
@@ -905,6 +957,7 @@ export default function DocumentPreview({
   const handleDownloadPDF = async () => {
     setExportingPDF(true);
     try {
+      await waitForPreviewPagination();
       // 1. Cargar la librería html2pdf.js desde una CDN segura de forma asíncrona
       const html2pdf = await new Promise<any>((resolve, reject) => {
         if ((window as any).html2pdf) {
@@ -1549,6 +1602,8 @@ export default function DocumentPreview({
   useEffect(() => {
     const token = ++paginationTokenRef.current;
     setRecalculating(true);
+    (window as any).__wpRecalculating = true;
+    if (!tocEngineReady) return;
 
     const handlePagination = async () => {
       if (!hiddenMeasureRef.current) {
@@ -1556,12 +1611,20 @@ export default function DocumentPreview({
         return;
       }
 
+      await document.fonts.ready;
+      const metrics = tocEngine.info
+        ? await deriveMetrics(tocEngine.info, { contentElement: hiddenMeasureRef.current, width: contentWidth })
+        : null;
+      if (paginationTokenRef.current !== token) throw new PaginationCancelled();
+      setTocMetrics(metrics);
+
       // If the document contains mermaid diagrams, wait until the library is
       // loaded so measureHTMLHeight() can size the fenced blocks from their
       // rendered SVG instead of the (much shorter) raw diagram source text.
       if (hiddenMeasureRef.current.querySelector('.mermaid')) {
         await ensureMermaidLoaded();
       }
+      if (paginationTokenRef.current !== token) throw new PaginationCancelled();
 
       // Select raw rendered children in our hidden container
       const childNodes = Array.from(hiddenMeasureRef.current.children) as HTMLElement[];
@@ -1680,6 +1743,13 @@ export default function DocumentPreview({
         }
         return tempMeasureContainer.getBoundingClientRect().height;
       };
+
+      // Measure assembled pages, not sums of isolated blocks: selectors such as
+      // h1:first-of-type and collapsing sibling margins depend on page context.
+      const measurePageHeight = (candidateHTML = ''): Promise<number> =>
+        measureHTMLHeight(
+          `<div class="wp-document-body">${pagesList[currentPageIndex].join('')}${candidateHTML}</div>`,
+        );
 
       // Keep headings with their following content: never leave a heading
       // orphaned at the bottom of a page alone (or with just 1-2 lines of the
@@ -1867,7 +1937,6 @@ export default function DocumentPreview({
         }
 
         const isHeading = ['H1', 'H2', 'H3', 'H4', 'H5'].includes(item.tagName);
-        const elementHeight = await measureHTMLHeight(item.html);
 
         if (item.isPageBreak) {
           currentPageIndex++;
@@ -1877,8 +1946,9 @@ export default function DocumentPreview({
           continue;
         }
 
-        // Check if fits entirely on the current page
-        if (accumulatedPageHeight + elementHeight <= maxHeight) {
+        // Check the candidate together with all blocks already on this page.
+        const candidatePageHeight = await measurePageHeight(item.html);
+        if (candidatePageHeight <= maxHeight) {
           // Keep headings / run-in titles with the start of their following
           // content. If that pair does not fit in the remaining space, push
           // the title to a fresh page (only when the current page already has
@@ -1891,16 +1961,20 @@ export default function DocumentPreview({
               nextItem.html.trim() &&
               hasVisibleContent(nextItem.html)
             ) {
-              const nextFullHeight = await measureHTMLHeight(nextItem.html);
+              const nextFullHeight = Math.max(
+                0,
+                await measurePageHeight(item.html + nextItem.html) - candidatePageHeight,
+              );
               const nextIsAtomic =
                 ATOMIC_KEEP_TAGS.has(nextItem.tagName) ||
+                /\bwp-rendered-figure\b/.test(nextItem.className || '') ||
                 isKeepWithNext(nextItem.tagName, nextItem.className);
               const keepHeight = nextIsAtomic
                 ? nextFullHeight
                 : Math.min(nextFullHeight, keepLineHeight * KEEP_HEADING_LINES);
               if (
                 accumulatedPageHeight > 0 &&
-                accumulatedPageHeight + elementHeight + keepHeight > maxHeight
+                candidatePageHeight + keepHeight > maxHeight
               ) {
                 currentPageIndex++;
                 pagesList.push([]);
@@ -1909,7 +1983,7 @@ export default function DocumentPreview({
             }
           }
           pagesList[currentPageIndex].push(item.html);
-          accumulatedPageHeight += elementHeight;
+          accumulatedPageHeight = await measurePageHeight();
           
           // Scrape headings for TOC
           const parserDiv = document.createElement('div');
@@ -1954,7 +2028,7 @@ export default function DocumentPreview({
               accumulatedPageHeight = 0;
             }
             pagesList[currentPageIndex].push(item.html);
-            accumulatedPageHeight += elementHeight;
+            accumulatedPageHeight = await measurePageHeight();
             continue;
           }
 
@@ -1974,15 +2048,14 @@ export default function DocumentPreview({
           }
           
           let currentPartRows: HTMLElement[] = [];
-          let currentPartHeight = theadHeight + 10;
           let splitIndex = 0;
 
           for (let i = 0; i < rows.length; i++) {
             const row = rows[i];
-            const rowHeight = row.getBoundingClientRect().height;
-            const curLimit = maxHeight - accumulatedPageHeight;
-            
-            if (currentPartHeight + rowHeight > curLimit && currentPartRows.length > 0) {
+            const candidateHTML = buildTablePart(tableEl, [...currentPartRows, row], splitIndex > 0);
+            const candidateHeight = await measurePageHeight(candidateHTML);
+
+            if (candidateHeight > maxHeight && currentPartRows.length > 0) {
               const isCont = splitIndex > 0;
               const tableHtml = buildTablePart(tableEl, currentPartRows, isCont);
               pagesList[currentPageIndex].push(tableHtml);
@@ -1992,11 +2065,8 @@ export default function DocumentPreview({
               pagesList.push([]);
               accumulatedPageHeight = 0;
               currentPartRows = [row];
-              const shouldRepeatHeader = settings.repeatTableHeader ?? true;
-              currentPartHeight = (shouldRepeatHeader ? theadHeight : 0) + 10 + rowHeight;
             } else {
               currentPartRows.push(row);
-              currentPartHeight += rowHeight;
             }
           }
           
@@ -2004,7 +2074,7 @@ export default function DocumentPreview({
             const isCont = splitIndex > 0;
             const tableHtml = buildTablePart(tableEl, currentPartRows, isCont);
             pagesList[currentPageIndex].push(tableHtml);
-            accumulatedPageHeight = currentPartHeight;
+            accumulatedPageHeight = await measurePageHeight();
           }
         } else if (item.tagName === 'P') {
           // Paragraph splitting!
@@ -2040,9 +2110,9 @@ export default function DocumentPreview({
               ? (item.styleAttr ? `${item.styleAttr}; text-align-last: justify !important;` : `text-align-last: justify !important;`)
               : item.styleAttr;
             const testHTML = `<p class="${item.className}" style="${part1Style || ''}">${part1}</p>`;
-            const h = await measureHTMLHeight(testHTML);
+            const h = await measurePageHeight(testHTML);
             
-            if (h <= maxHeight - accumulatedPageHeight) {
+            if (h <= maxHeight) {
               bestSplitIndex = mid;
               bestPart1HTML = testHTML;
               bestPart2HTML = `<p class="${item.className}" style="${part2Style}">${part2}</p>`;
@@ -2070,7 +2140,7 @@ export default function DocumentPreview({
 
           if (bestSplitIndex > 0) {
             pagesList[currentPageIndex].push(bestPart1HTML);
-            accumulatedPageHeight += await measureHTMLHeight(bestPart1HTML);
+            accumulatedPageHeight = await measurePageHeight();
             
             if (bestSplitIndex < tokens.length) {
               // Push the remaining part back to the queue to be processed next
@@ -2128,9 +2198,9 @@ export default function DocumentPreview({
             }
             
             const testHTML = `<pre class="${item.className}" style="${part1StyleAttr}"><code class="${codeClass}" style="${codeStyle}">${part1Lines}</code></pre>`;
-            const h = await measureHTMLHeight(testHTML);
+            const h = await measurePageHeight(testHTML);
             
-            if (h <= maxHeight - accumulatedPageHeight) {
+            if (h <= maxHeight) {
               bestSplitLines = mid;
               bestPart1HTML = testHTML;
               bestPart2HTML = `<pre class="${item.className}" style="${part2StyleAttr}"><code class="${codeClass}" style="${codeStyle}">${part2Lines}</code></pre>`;
@@ -2166,7 +2236,7 @@ export default function DocumentPreview({
 
           if (bestSplitLines > 0) {
             pagesList[currentPageIndex].push(bestPart1HTML);
-            accumulatedPageHeight += await measureHTMLHeight(bestPart1HTML);
+            accumulatedPageHeight = await measurePageHeight();
             
             if (bestSplitLines < lines.length) {
               let part2StyleAttr = item.styleAttr;
@@ -2211,9 +2281,9 @@ export default function DocumentPreview({
             const part1ItemsHTML = items.slice(0, mid).map(it => it.outerHTML).join('');
             const part2ItemsHTML = items.slice(mid).map(it => it.outerHTML).join('');
             const testHTML = `<${listTag} class="${item.className}" style="${item.styleAttr}">${part1ItemsHTML}</${listTag}>`;
-            const h = await measureHTMLHeight(testHTML);
+            const h = await measurePageHeight(testHTML);
             
-            if (h <= maxHeight - accumulatedPageHeight) {
+            if (h <= maxHeight) {
               bestSplitItems = mid;
               bestPart1HTML = testHTML;
               const listStart = listTag === 'ol' ? ` start="${mid + 1}"` : '';
@@ -2235,7 +2305,7 @@ export default function DocumentPreview({
 
           if (bestSplitItems > 0) {
             pagesList[currentPageIndex].push(bestPart1HTML);
-            accumulatedPageHeight += await measureHTMLHeight(bestPart1HTML);
+            accumulatedPageHeight = await measurePageHeight();
             
             if (bestSplitItems < items.length) {
               queue.splice(qIndex, 0, {
@@ -2273,7 +2343,13 @@ export default function DocumentPreview({
                 'FIGURE', 'PICTURE', 'SVG', 'CANVAS', 'MATH', 'VIDEO', 'AUDIO', 'IFRAME', 'IMG'
               ]);
 
-              if (blockEl && !NON_SPLITTABLE_CONTAINERS.has(blockEl.tagName)) {
+              // APA figures (caption + image + note, wrapped in .wp-rendered-figure)
+              // must stay together: splitting them would leave the "Figura N" title
+              // on one page and the image on the next.
+              const isAtomicFigure =
+                blockEl && blockEl.classList.contains('wp-rendered-figure');
+
+              if (blockEl && !NON_SPLITTABLE_CONTAINERS.has(blockEl.tagName) && !isAtomicFigure) {
                 let targetEl: HTMLElement | null = blockEl;
                 // Drill down through single-child wrapper elements (e.g. .timeline-section > .timeline)
                 while (targetEl && targetEl.children.length === 1) {
@@ -2303,7 +2379,7 @@ export default function DocumentPreview({
                 qIndex--; // retry on fresh page
               } else {
                 pagesList[currentPageIndex].push(item.html);
-                accumulatedPageHeight += elementHeight;
+                accumulatedPageHeight = await measurePageHeight();
               }
               continue;
             }
@@ -2333,8 +2409,8 @@ export default function DocumentPreview({
               const part1HTML = childEls.slice(0, mid).map((c) => c.outerHTML).join('');
               const part2HTML = childEls.slice(mid).map((c) => c.outerHTML).join('');
               const testHTML = blockOpen + part1HTML + blockClose;
-              const h = await measureHTMLHeight(testHTML);
-              if (h <= maxHeight - accumulatedPageHeight) {
+              const h = await measurePageHeight(testHTML);
+              if (h <= maxHeight) {
                 bestSplitCount = mid;
                 bestPart1HTML = blockOpen + part1HTML + blockClose;
                 bestPart2HTML = blockOpen + part2HTML + blockClose;
@@ -2356,7 +2432,7 @@ export default function DocumentPreview({
 
             if (bestSplitCount > 0) {
               pagesList[currentPageIndex].push(bestPart1HTML);
-              accumulatedPageHeight += await measureHTMLHeight(bestPart1HTML);
+              accumulatedPageHeight = await measurePageHeight();
 
               if (bestSplitCount < childEls.length) {
                 queue.splice(qIndex, 0, {
@@ -2446,6 +2522,11 @@ export default function DocumentPreview({
       const coverOffset = hasCover ? 1 : 0;
       if (settings.showTOC) {
         const measureTOCPart = (headerText: string, items: HeadingItem[]): number => {
+          if (metrics) {
+            return (headerText ? metrics.headerHeight : 0) + items.reduce(
+              (height, item) => height + (metrics.entryHeightPerLevel?.[item.level] ?? metrics.entryHeight), 0,
+            );
+          }
           let html = `<div class="toc-container select-text">`;
           if (headerText) {
             html += `<div class="toc-header">${headerText}</div>`;
@@ -2567,7 +2648,11 @@ export default function DocumentPreview({
       if (!(err instanceof PaginationCancelled)) {
         console.error('Error during pagination:', err);
       }
+    }).finally(() => {
       if (paginationTokenRef.current === token) {
+        // React may batch true -> false without changing the rendered state,
+        // so its mirroring effect alone cannot clear this export readiness flag.
+        (window as any).__wpRecalculating = false;
         setRecalculating(false);
       }
     });
@@ -2576,7 +2661,7 @@ export default function DocumentPreview({
       paginationTokenRef.current += 1;
       setRecalculating(false);
     };
-  }, [resolvedHtmlContent, settings.pageSize, settings.orientation, settings.showTOC, settings.tocTitle, settings.tocLevels, settings.manualTOCEntries, settings.blockStyleTOC, setPageCount, isLetter, leftMargin, rightMargin, topMargin, bottomMargin, pageHeight, settings.splitBlockCodeBorders, resolvedCover.enabled]);
+  }, [tocEngineReady, tocEngine, contentWidth, externalCss, settings.customAddedCss, settings.blockStyleTitles, resolvedHtmlContent, settings.pageSize, settings.orientation, settings.showTOC, settings.tocTitle, settings.tocLevels, settings.manualTOCEntries, setPageCount, isLetter, leftMargin, rightMargin, topMargin, bottomMargin, pageHeight, settings.splitBlockCodeBorders, resolvedCover.enabled]);
   // Initialize Mermaid diagrams after content changes
   useEffect(() => {
     const loadMermaid = async () => {
@@ -2999,7 +3084,7 @@ export default function DocumentPreview({
   };
 
   return (
-    <div className="flex-1 bg-slate-100 flex flex-col h-full min-w-0 font-sans print:bg-white select-none relative">
+    <div className="flex-1 bg-gray-400 flex flex-col h-full min-w-0 font-sans print:bg-white select-none relative">
       
       {/* Dynamic CSS Code Blocks compilation injected visually right here */}
       <style dangerouslySetInnerHTML={{ __html: `
@@ -3018,13 +3103,30 @@ export default function DocumentPreview({
           }
         }
         ${BASE_TOC_CSS}
+        /* Diagramas Mermaid: centrados y limitados a la altura imprimible para
+           no desbordar ni recortarse por el overflow:hidden de la hoja fija.
+           Funciona tanto con el <svg> directo como con el wrapper #dmermaid-*
+           que inserta mermaid.run(). */
+        .mermaid {
+          text-align: center !important;
+          margin: 16px 0 !important;
+          max-width: 100% !important;
+          overflow: visible !important;
+        }
+        .mermaid svg {
+          display: block !important;
+          margin: 0 auto !important;
+          max-width: 100% !important;
+          ${settings.pageSize !== 'continuous' ? `max-height: ${Math.max(80, Math.round(pageHeight - topMargin - bottomMargin - 48))}px !important;` : ''}
+          width: auto !important;
+          height: auto !important;
+        }
         ${externalCss}
         ${getGraphicalAndCustomCSS()}
         ${settings.blockStyleTitles || ''}
         ${settings.blockStyleHeader || ''}
         ${settings.blockStyleFooter || ''}
         ${settings.blockStylePageNum || ''}
-        ${settings.blockStyleTOC || ''}
         ${settings.blockStyleLists || ''}
         ${settings.tableCustomCss || ''}
         ${settings.autoNumberHeadings ? `
@@ -3257,7 +3359,7 @@ export default function DocumentPreview({
           )}
         </div>
       ) : (
-        <div className="flex-1 overflow-auto custom-scrollbar print:p-0 print:overflow-visible print:bg-white bg-neutral-100 flex flex-col items-center select-none min-h-0 w-full p-8">
+        <div className="flex-1 overflow-auto custom-scrollbar print:p-0 print:overflow-visible print:bg-white bg-gray-400 flex flex-col items-center select-none min-h-0 w-full p-8">
         <div
           className={`document-rendered-container flex flex-col ${settings.pageSize === 'continuous' ? 'gap-0 p-0 shadow-none border-none' : 'gap-8'} print:gap-0 transition-transform origin-top`}
           style={{
@@ -3305,18 +3407,32 @@ export default function DocumentPreview({
                 >
                   <div className="toc-container select-text">
                     {isFirst && (
-                      <div className="toc-header">
+                      <div className="toc-header" style={tocMetrics ? {
+                        lineHeight: 1,
+                        height: Math.max(0, tocMetrics.headerHeight - 24),
+                        marginTop: 0,
+                        marginBottom: Math.min(24, tocMetrics.headerHeight),
+                        boxSizing: 'border-box',
+                      } : undefined}>
                         {settings.tocTitle || "Tabla de Contenidos"}
                       </div>
                     )}
                     <ul className="toc-list">
                       {tocPageHeadings.map((heading, hIdx) => {
                         const levelClass = `toc-level-${heading.level}`;
+                        const entryHeight = tocMetrics?.entryHeightPerLevel?.[heading.level] ?? tocMetrics?.entryHeight;
 
                         return (
                           <li
                             key={hIdx}
                             className={`toc-item ${levelClass}`}
+                            style={entryHeight !== undefined ? {
+                              lineHeight: 1,
+                              height: Math.max(0, entryHeight - 8),
+                              marginTop: 0,
+                              marginBottom: Math.min(8, entryHeight),
+                              boxSizing: 'border-box',
+                            } : undefined}
                           >
                             <span className="toc-title">{heading.text}</span>
                             <span className="toc-dots" />

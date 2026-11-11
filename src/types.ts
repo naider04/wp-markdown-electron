@@ -51,7 +51,6 @@ export interface PageSettings {
   blockStyleHeader?: string;
   blockStyleFooter?: string;
   blockStylePageNum?: string;
-  blockStyleTOC?: string;
   blockStyleLists?: string;
   pageNumTemplate?: string;
   autoNumberHeadings?: boolean;

@@ -262,6 +262,12 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
   const leftMargin = settings.marginLeft !== undefined ? settings.marginLeft : 96;
   const rightMargin = settings.marginRight !== undefined ? settings.marginRight : 96;
 
+  // Altura imprimible real de la hoja (px). Limita los diagramas Mermaid para
+  // que quepan dentro de la página y no se recorten por el overflow:hidden.
+  const printableHeight = isContinuous
+    ? null
+    : Math.max(80, Math.round(parseInt(paperHeight, 10) - topMargin - bottomMargin - 48));
+
   const clean = `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -277,7 +283,7 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
 
     body, html {
       margin: 0; padding: 0;
-      background-color: #fafafa !important;
+      background-color: #9ca3af !important;
       font-family: "Inter", system-ui, -apple-system, sans-serif;
       text-rendering: optimizeLegibility;
       -webkit-font-smoothing: antialiased;
@@ -285,7 +291,7 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
 
     .document-rendered-container {
       display: flex; flex-direction: column; align-items: center; gap: 32px;
-      padding: 48px 24px; background-color: #fafafa !important;
+      padding: 48px 24px; background-color: #9ca3af !important;
     }
 
     div[name^="document-page-"] {
@@ -325,6 +331,8 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
       border-bottom-color: currentColor !important; display: inline-block !important;
     }
 
+    /* Fallback typography must not override the CSS used to paginate the preview. */
+    ${previewCss ? '' : `
     .wp-document-content {
       font-family: "Times New Roman", Times, Georgia, serif !important;
       font-size: 16px !important; line-height: 1.8 !important; color: #000000 !important; text-align: left !important;
@@ -387,6 +395,8 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
       margin: 0 auto !important; border-radius: 2px !important;
     }
 
+    `}
+
     .wp-academic-header {
       position: absolute !important; top: ${Math.max(10, topMargin - 60)}px !important;
       left: ${leftMargin}px !important; right: ${rightMargin}px !important; height: 50px !important;
@@ -403,7 +413,7 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
     @media print {
       #wp-academic-toolbar, .print\\:hidden, .print-hidden { display: none !important; opacity: 0 !important; visibility: hidden !important; height: 0 !important; width: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; }
       body, html { background-color: #ffffff !important; }
-      .document-rendered-container { padding: 0 !important; gap: 0 !important; display: block !important; }
+      .document-rendered-container { padding: 0 !important; gap: 0 !important; display: block !important; background-color: #ffffff !important; }
       div[name^="document-page-"] {
         box-shadow: none !important; border: none !important; page-break-after: always !important;
         break-after: page !important; page-break-inside: avoid !important; break-inside: avoid !important;
@@ -425,12 +435,32 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
 
     ${BASE_TOC_CSS}
 
+    /* Diagramas Mermaid: centrados y escalados al ancho útil de la hoja en vez
+       de conservar su tamaño intrínseco (que puede desbordar y cortarse por el
+       overflow:hidden de la página de tamaño fijo). El max-height limita la
+       altura para que el diagrama quepa siempre dentro de la hoja. Funciona
+       tanto con el <svg> directo como con el wrapper #dmermaid-* que inserta
+       mermaid.run(). */
+    .mermaid {
+      text-align: center !important;
+      margin: 16px 0 !important;
+      max-width: 100% !important;
+      overflow: visible !important;
+    }
+    .mermaid svg {
+      display: block !important;
+      margin: 0 auto !important;
+      max-width: 100% !important;
+      ${printableHeight ? `max-height: ${printableHeight}px !important;` : ''}
+      width: auto !important;
+      height: auto !important;
+    }
+
     ${getGraphicalCSS(settings)}
     ${sanitizeCSS(settings.blockStyleTitles || '')}
     ${sanitizeCSS(settings.blockStyleHeader || '')}
     ${sanitizeCSS(settings.blockStyleFooter || '')}
     ${sanitizeCSS(settings.blockStylePageNum || '')}
-    ${sanitizeCSS(settings.blockStyleTOC || '')}
     ${sanitizeCSS(settings.blockStyleLists || DEFAULT_BLOCK_LISTS)}
     ${sanitizeCSS(settings.tableCustomCss || '')}
     ${sanitizeCSS(settings.customAddedCss || '')}
@@ -462,6 +492,30 @@ export function buildStandaloneHtml({ settings, cover, pagesHTML, exportFileName
   <div class="document-rendered-container">
     ${pagesHTML}
   </div>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    // Red de seguridad: si algún diagrama .mermaid quedó sin convertir por la
+    // compilación, el navegador lo dibuja al abrir el documento. Los bloques ya
+    // renderizados (data-processed) se ignoran para no volver a parsearlos.
+    (function () {
+      function wpRunMermaid() {
+        if (typeof window.mermaid === 'undefined') return;
+        try {
+          window.mermaid.initialize({ startOnLoad: false, theme: 'default' });
+          window.mermaid.run({ querySelector: '.mermaid:not([data-processed])' });
+        } catch (e) {
+          console.error('Mermaid render error:', e);
+        }
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+          requestAnimationFrame(wpRunMermaid);
+        });
+      } else {
+        wpRunMermaid();
+      }
+    })();
+  </script>
 </body>
 </html>`;
 

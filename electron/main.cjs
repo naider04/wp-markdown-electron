@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs/promises');
+const { loadTocEngineInfo } = require('../bin/toc-engine-info.cjs');
 
 // Initial project folder (first window). Provided either by the CLI "open"
 // command via the --folder arg or by the WP_PROJECT_FOLDER env var.
@@ -10,6 +11,7 @@ let projectFolder = process.env.WP_PROJECT_FOLDER || null;
 function folderFromArgv(argv) {
   const folderIdx = argv.indexOf('--folder');
   if (folderIdx !== -1 && argv[folderIdx + 1]) {
+
     return path.resolve(argv[folderIdx + 1]);
   }
   return null;
@@ -76,14 +78,17 @@ function manifestPath(folder) {
 // documento_formateado.html, or the source md/config files change on disk),
 // and tells the renderer to reload the project.
 const PROJECT_WATCH_FILES = [CONTENT_NAME, 'contenido_fuente.qmd', 'portada.md', MANIFEST_NAME, 'documento_formateado.html'];
+const WATCH_IGNORED_DIRS = new Set([PROJECT_DATA_DIR, 'node_modules', '.git', 'dist', '.cache']);
 
 function watchProject(win, folder) {
   if (!folder || !fs.existsSync(folder) || !win) return;
   try {
-    const onChange = (_event, filename) => {
-      if (!filename) return;
-      const relevant = PROJECT_WATCH_FILES.includes(String(filename)) || String(filename) === PROJECT_DATA_DIR;
-      if (!relevant) return;
+    const onChange = (_event, filename, fromSubdir) => {
+      if (!fromSubdir) {
+        if (!filename) return;
+        const relevant = PROJECT_WATCH_FILES.includes(String(filename)) || String(filename) === PROJECT_DATA_DIR;
+        if (!relevant) return;
+      }
       if (win._watchTimer) clearTimeout(win._watchTimer);
       win._watchTimer = setTimeout(() => {
         if (win && !win.isDestroyed()) {
@@ -102,10 +107,43 @@ function watchProject(win, folder) {
       win._watchers.push(win._watcherData);
       win._dataWatcherAttached = true;
     };
-    win._watchers.push(fs.watch(folder, { persistent: false }, (_event, filename) => {
-      if (String(filename || '') === PROJECT_DATA_DIR) attachDataWatcher();
-      onChange(_event, filename);
-    }));
+
+    // Watch the project root plus its subdirectories (non-recursive fs.watch is
+    // platform-Linux-friendly) so `@include("sections/*.md")` changes refresh
+    // the preview even though the content file at the root did not change.
+    const watchedDirs = new Set();
+    const addDirWatcher = (dir, depth) => {
+      if (depth > 6 || !dir || watchedDirs.has(dir)) return;
+      let stat;
+      try {
+        stat = fs.statSync(dir);
+      } catch (e) {
+        return;
+      }
+      if (!stat.isDirectory()) return;
+      watchedDirs.add(dir);
+      try {
+        const watcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
+          if (depth === 0 && String(filename) === PROJECT_DATA_DIR) attachDataWatcher();
+          onChange(_event, filename, depth > 0);
+        });
+        win._watchers.push(watcher);
+      } catch (e) {
+        /* directory may be unwatchable; keep going */
+      }
+      let entries = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch (e) {
+        entries = [];
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.') || WATCH_IGNORED_DIRS.has(entry.name)) continue;
+        addDirWatcher(path.join(dir, entry.name), depth + 1);
+      }
+    };
+    addDirWatcher(folder, 0);
     attachDataWatcher();
   } catch (e) {
     console.error('No se pudo vigilar la carpeta del proyecto:', e.message);
@@ -323,6 +361,22 @@ ipcMain.handle('project:readFolder', async (_evt, folder) => {
   images = Array.from(imageByName.values());
 
   return { folder: dir, manifest, contentPath, contentText, bibPath, bibtex, stylesPath, stylesText, coverPath: coverText ? coverPath : null, coverText, images };
+});
+
+
+// ---- IPC: read TOC engine info (metrics + sample HTML) ----------------
+// Returns { available, metrics, sampleHtml, error } - used by renderer
+ipcMain.handle("project:readTocEngine", async (_evt, project) => {
+  try {
+    return await loadTocEngineInfo(project);
+  } catch (e) {
+    return {
+      available: false,
+      metrics: null,
+      sampleHtml: null,
+      error: String((e && e.message) || e)
+    };
+  }
 });
 
 // ---- IPC: save a project (write manifest + copied content + base64 images) --

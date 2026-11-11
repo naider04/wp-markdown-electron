@@ -144,40 +144,6 @@ const COMPATIBLE_LISTS_CSS = `/* 1. Ajustar el contenedor general de las listas 
   display: inline !important;
 }`;
 
-const DEFAULT_BLOCK_TOC = `.toc-header {
-  font-family: "Times New Roman", Times, serif;
-  font-size: 16px;
-  font-weight: bold;
-  text-align: center;
-  margin-bottom: 24px;
-}
-.toc-item {
-  font-family: "Times New Roman", Times, serif;
-  font-size: 16px;
-  line-height: 2;
-  margin-bottom: 12px;
-}
-.toc-level-1 {
-  padding-left: 0px;
-  font-weight: bold;
-}
-.toc-level-2 {
-  padding-left: 24px;
-}
-.toc-level-3 {
-  padding-left: 48px;
-  font-style: italic;
-}
-.toc-container .toc-dots,
-.toc-item .toc-dots {
-  border-bottom: 1px dotted black !important;
-  margin: 0 8px;
-}
-.toc-page {
-  font-weight: bold;
-  font-size: 16px;
-}`;
-
 function AutoGrowingTextArea({
   value,
   onChange,
@@ -791,7 +757,6 @@ export function ConfigDrawer({
     const blockStyleHeader = settings.blockStyleHeader || '';
     const blockStyleFooter = settings.blockStyleFooter || '';
     const blockStylePageNum = settings.blockStylePageNum || '';
-    const blockStyleTOC = settings.blockStyleTOC || '';
     const blockStyleLists = settings.blockStyleLists || '';
     const tableCustomCss = settings.tableCustomCss || '';
     const customAddedCss = settings.customAddedCss || '';
@@ -802,7 +767,6 @@ export function ConfigDrawer({
       blockStyleHeader && `/* --- ENCABEZADO (HEADER) --- */\n${blockStyleHeader}`,
       blockStyleFooter && `/* --- PIE DE PÁGINA (FOOTER) --- */\n${blockStyleFooter}`,
       blockStylePageNum && `/* --- NUMERACIÓN DE PÁGINAS --- */\n${blockStylePageNum}`,
-      blockStyleTOC && `/* --- TABLA DE CONTENIDOS (TOC) --- */\n${blockStyleTOC}`,
       blockStyleLists && `/* --- ESTILO DE LISTAS --- */\n${blockStyleLists}`,
       tableCustomCss && `/* --- FORMATO DE TABLAS --- */\n${tableCustomCss}`,
       customAddedCss && `/* --- OTROS ESTILOS PERSONALIZADOS --- */\n${customAddedCss}`,
@@ -1471,7 +1435,7 @@ Arquitectura de Computador
 Ing. Bermeo Paucar Javier, Mgti
 
 ## FECHA:
-Junio 18, 2026
+[FECHA]
 
 ## PERIODO:
 Abril 2026 - Julio 2026
@@ -2259,6 +2223,29 @@ Abril 2026 - Julio 2026
                 Ajustes Generales del Índice
               </span>
 
+              {/* Título personalizado de la Tabla de Contenidos */}
+              <div className="flex flex-col gap-1.5 border-t border-slate-900 pt-3">
+                <label
+                  htmlFor="toc-title-input"
+                  className="text-[9.5px] font-bold text-slate-350 uppercase"
+                >
+                  {t('tocTitleLabel')}
+                </label>
+                <input
+                  id="toc-title-input"
+                  type="text"
+                  value={settings.tocTitle ?? ''}
+                  placeholder={t('tocDefaultTitle')}
+                  onChange={(e) => handleSettingsChange('tocTitle', e.target.value)}
+                  className="p-1.5 bg-slate-900 border border-slate-850 rounded text-slate-200 text-xs focus:ring-1 focus:ring-orange-500 focus:outline-none"
+                />
+                <p className="text-[9px] text-slate-500 leading-relaxed">
+                  {language === 'es'
+                    ? 'Se usa como encabezado del índice y se guarda en la configuración del proyecto (settings) para que el toc-engine.cjs lo procese.'
+                    : 'Used as the TOC header and saved in the project settings so toc-engine.cjs can process it.'}
+                </p>
+              </div>
+
               {/* Headings autonumbering toggle */}
               <div className="flex items-center justify-between border-t border-slate-900 pt-3">
                 <span className="text-[9.5px] font-bold text-slate-350 uppercase">Auto-Numerar Títulos (H1, H2, H3)</span>
@@ -2390,49 +2377,20 @@ Abril 2026 - Julio 2026
               )}
             </div>
 
-            {/* 3. CSS Customization Editor for blockStyleTOC */}
+            {/* 3. TOC design is owned by the toc-engine.cjs file in the project. */}
             <div className="flex flex-col gap-2 p-3 bg-slate-950 rounded border border-slate-850">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
-                  Diseño de Tabla de Contenidos
+                  Diseño del Índice
                 </span>
-                <div className="flex gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const cssToCopy = settings.blockStyleTOC || DEFAULT_BLOCK_TOC;
-                      navigator.clipboard.writeText(cssToCopy)
-                        .then(() => triggerSuccessMsg('¡Estilos CSS copiados!'))
-                        .catch(() => alert('Error al copiar al portapapeles.'));
-                    }}
-                    className="px-1.5 py-0.5 bg-slate-900 hover:bg-slate-850 text-[8.5px] text-slate-300 rounded font-medium flex items-center gap-0.5 border border-slate-800"
-                    title="Copiar los estilos CSS de la tabla de contenidos al portapapeles"
-                  >
-                    Copiar CSS
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (confirm('¿Restablecer los estilos del Índice a los predeterminados?')) {
-                        handleSettingsChange('blockStyleTOC', DEFAULT_BLOCK_TOC);
-                        triggerSuccessMsg('Estilos del Índice restablecidos.');
-                      }
-                    }}
-                    className="px-1.5 py-0.5 bg-slate-900 hover:bg-slate-850 text-[8.5px] text-slate-400 hover:text-slate-300 rounded font-medium flex items-center gap-0.5 border border-slate-800"
-                    title="Restablecer a los estilos predeterminados"
-                  >
-                    Restablecer
-                  </button>
-                </div>
               </div>
-              
-              <textarea
-                value={settings.blockStyleTOC || ''}
-                onChange={(e) => handleSettingsChange('blockStyleTOC', e.target.value)}
-                rows={10}
-                className="w-full p-2 bg-slate-900 border border-slate-800 rounded text-slate-200 font-mono text-[10px] leading-relaxed focus:border-orange-500 focus:outline-none"
-                placeholder="/* Estilos CSS para el TOC de la hoja */"
-              />
+              <p className="text-[9.5px] text-slate-500 leading-relaxed">
+                El diseño de la tabla de contenidos se edita directamente en el archivo{' '}
+                <code className="text-sky-300">toc-engine.cjs</code> de la carpeta del proyecto
+                (el archivo HTML y sus estilos CSS). <span className="text-slate-400">mdwp build</span> ejecuta
+                ese motor para generar el índice, reescribe <code className="text-sky-300">.mdwp/toc.json</code> con
+                los títulos, pero no toca tu motor personalizado.
+              </p>
             </div>
           </div>
         )}

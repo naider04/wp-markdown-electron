@@ -18,6 +18,8 @@ import { Sliders, Image, Upload, Printer, Trash2, Code, ChevronDown, BookOpen, R
 import { TemplatesDrawer } from './components/TemplatesDrawer';
 import { extractCoverCss, compileCoverHtml, getYamlCssSources, parseYamlFrontMatter, parseCoverSource } from './utils/markdownParser';
 import { buildStandaloneHtml } from './lib/standaloneHtml';
+import { expandMarkdownIncludes } from './utils/markdownIncludes';
+import { waitForPreviewPagination, type TocEngineInfo } from './utils/tocMetrics';
 import { parseStylesFile, buildStylesFile, STYLES_SECTIONS, STYLES_FILE_NAME } from './lib/stylesSheet';
 import { useLanguage } from './i18n/LanguageContext';
 
@@ -36,9 +38,11 @@ declare global {
       writeContent: (payload: any) => Promise<any>;
       writeStyles: (payload: any) => Promise<any>;
       saveBuiltHtml: (payload: any) => Promise<any>;
+      readTocEngine: (project: string) => Promise<TocEngineInfo>;
     };
     __wpCompileDone?: () => void;
     __wpPageCount?: number;
+    __wpTocEnginePending?: boolean;
   }
 }
 
@@ -165,40 +169,6 @@ const DEFAULT_BLOCK_PAGENUM = `/* Estilo de la Numeración de Página APA 7 */
   font-size: 11px;
 }`;
 
-const DEFAULT_BLOCK_TOC = `.toc-header {
-  font-family: "Times New Roman", Times, serif;
-  font-size: 16px;
-  font-weight: bold;
-  text-align: center;
-  margin-bottom: 24px;
-}
-.toc-item {
-  font-family: "Times New Roman", Times, serif;
-  font-size: 16px;
-  line-height: 2;
-  margin-bottom: 12px;
-}
-.toc-level-1 {
-  padding-left: 0px;
-  font-weight: bold;
-}
-.toc-level-2 {
-  padding-left: 24px;
-}
-.toc-level-3 {
-  padding-left: 48px;
-  font-style: italic;
-}
-.toc-container .toc-dots,
-.toc-item .toc-dots {
-  border-bottom: 1px dotted black !important;
-  margin: 0 8px;
-}
-.toc-page {
-  font-weight: bold;
-  font-size: 16px;
-}`;
-
 const DEFAULT_BLOCK_TABLE = `/* Estilos de Tablas Académicas APA 7 */
 .wp-document-content table {
   width: 100% !important;
@@ -216,7 +186,7 @@ const DEFAULT_BLOCK_TABLE = `/* Estilos de Tablas Académicas APA 7 */
   font-size: 12px !important;
   font-weight: bold !important;
   text-transform: none !important;
-  padding: 8px 12px !important;
+  padding: 6px 8px !important;
   text-align: left !important;
   border-top: 2px solid #000000 !important; /* APA 7: Top border */
   border-bottom: 1.5px solid #000000 !important; /* APA 7: Bottom border of header */
@@ -227,7 +197,7 @@ const DEFAULT_BLOCK_TABLE = `/* Estilos de Tablas Académicas APA 7 */
 .wp-document-content table td {
   font-size: 12px !important;
   color: #000000 !important;
-  padding: 8px 12px !important;
+  padding: 6px 8px !important;
   border-top: none !important;
   border-left: none !important;
   border-right: none !important;
@@ -241,6 +211,12 @@ const DEFAULT_BLOCK_TABLE = `/* Estilos de Tablas Académicas APA 7 */
 
 .wp-document-content table tbody tr:last-child td {
   border-bottom: 2px solid #000000 !important; /* APA 7: Bottom border of the entire table */
+}
+
+.wp-document-content table th p,
+.wp-document-content table td p {
+  text-align: left !important;
+  text-indent: 0 !important;
 }
 
 /* Zebra alternating rows - disabled for pure APA 7 */
@@ -428,7 +404,7 @@ Arquitectura de Computador
 Ing. Bermeo Paucar Javier, Mgti
 
 ## FECHA:
-Junio 18, 2026
+[FECHA]
 
 ## PERIODO:
 Abril 2026 - Julio 2026
@@ -599,7 +575,6 @@ export default function App() {
           blockStyleHeader: DEFAULT_BLOCK_HEADER,
           blockStyleFooter: DEFAULT_BLOCK_FOOTER,
           blockStylePageNum: DEFAULT_BLOCK_PAGENUM,
-          blockStyleTOC: DEFAULT_BLOCK_TOC,
           blockStyleLists: DEFAULT_BLOCK_LISTS,
           tableCustomCss: DEFAULT_BLOCK_TABLE,
           pageNumTemplate: 'Página {page} de {total}',
@@ -650,7 +625,6 @@ export default function App() {
       blockStyleHeader: DEFAULT_BLOCK_HEADER,
       blockStyleFooter: DEFAULT_BLOCK_FOOTER,
       blockStylePageNum: DEFAULT_BLOCK_PAGENUM,
-      blockStyleTOC: DEFAULT_BLOCK_TOC,
       blockStyleLists: DEFAULT_BLOCK_LISTS,
       tableCustomCss: DEFAULT_BLOCK_TABLE,
       pageNumTemplate: 'Página {page} de {total}',
@@ -865,6 +839,13 @@ export default function App() {
   });
   const [contentPath, setContentPath] = useState<string | null>(null);
   const [contentText, setContentText] = useState<string>('');
+  // Expanded copy of `contentText` with `@include(...)` directives inlined. The
+  // raw source is kept intact for the editor and heading writeback.
+  const [expandedContentText, setExpandedContentText] = useState<string>('');
+  // Bumped whenever the project folder changes so included files (which live
+  // outside the content file) are re-expanded even when `contentText` is stable.
+  const [includeRefreshKey, setIncludeRefreshKey] = useState<number>(0);
+  const compileServerRef = useRef<string | null>(null);
   const [externalCssText, setExternalCssText] = useState<string>('');
   const [bibPath, setBibPath] = useState<string | null>(null);
   const [showContentInPreview, setShowContentInPreview] = useState<boolean>(true);
@@ -1029,6 +1010,9 @@ export default function App() {
         } else {
           applyProjectData(data);
         }
+        // A changed included file leaves `contentText` untouched, so force the
+        // include expander to run again.
+        setIncludeRefreshKey((key) => key + 1);
       } catch (e) {
         console.error('No se pudo recargar el proyecto tras un cambio:', e);
       }
@@ -1147,19 +1131,19 @@ export default function App() {
 
   // Derived preview blocks: content file (when enabled) or empty (preview without content)
   const previewBlocks = useMemo<HTMLBlock[]>(() => {
-    if (showContentInPreview && contentText) {
+    if (showContentInPreview && expandedContentText) {
       return [
         {
           id: 'block_contenido',
           name: 'Contenido',
-          code: contentText,
+          code: expandedContentText,
           collapsed: false,
           isMarkdown: true,
         },
       ];
     }
     return [];
-  }, [contentText, showContentInPreview]);
+  }, [expandedContentText, showContentInPreview]);
 
   // In build mode (CLI), load the project from the data server and compile.
   useEffect(() => {
@@ -1208,7 +1192,65 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contentText, projectFolder]);
 
+  // Reads any project-relative file using the active transport (local build
+  // server or the Electron bridge) so `@include(...)` can pull sibling files.
+  const readProjectFile = useCallback(
+    async (rel: string): Promise<string | null> => {
+      const clean = rel.replace(/^\/+/, '');
+      const server = compileServerRef.current;
+      if (server) {
+        try {
+          const url =
+            server.replace(/\/$/, '') + '/' + clean.split('/').map(encodeURIComponent).join('/');
+          const res = await fetch(url);
+          if (res.ok) return await res.text();
+        } catch (e) {
+          /* ignore */
+        }
+        return null;
+      }
+      if (bridge && projectFolder) {
+        try {
+          return await bridge.readFile(projectFolder + '/' + clean);
+        } catch (e) {
+          return null;
+        }
+      }
+      return null;
+    },
+    [bridge, projectFolder],
+  );
+
+  // Expand `@include("...")` directives into a separate copy used only for
+  // rendering, leaving the raw `contentText` untouched.
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!contentText) {
+        setExpandedContentText('');
+        return;
+      }
+      const hasReader = !!compileServerRef.current || !!(bridge && projectFolder);
+      if (!hasReader) {
+        setExpandedContentText(contentText);
+        return;
+      }
+      try {
+        const expanded = await expandMarkdownIncludes(contentText, readProjectFile, { baseDir: '' });
+        if (!cancelled) setExpandedContentText(expanded);
+      } catch (e) {
+        if (!cancelled) setExpandedContentText(contentText);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contentText, readProjectFile, includeRefreshKey]);
+
   const runHeadlessCompile = async (mode: string, server: string | null) => {
+    compileServerRef.current = server ? server.replace(/\/$/, '') : null;
     let loadedContent = '';
     try {
       if (server) {
@@ -1308,11 +1350,30 @@ export default function App() {
               }
             }
           }
+          // Expand `@include(...)` BEFORE inlining project images so images
+          // referenced from section files are discovered too.
+          let expandedContent = loadedContent;
+          if (loadedContent && loadedContent.indexOf('@include') !== -1) {
+            try {
+              expandedContent = await expandMarkdownIncludes(loadedContent, async (rel) => {
+                try {
+                  const url =
+                    base + '/' + rel.split('/').map(encodeURIComponent).join('/');
+                  const res = await fetch(url);
+                  return res.ok ? await res.text() : null;
+                } catch (e) {
+                  return null;
+                }
+              });
+            } catch (e) {
+              expandedContent = loadedContent;
+            }
+          }
           // Inline project images (e.g. evidencias/*.png) BEFORE setting content
           // so the first pagination pass measures real heights (relative paths
           // 404 under /app/ and would otherwise pack unloaded images together).
-          if (loadedContent) {
-            const extras = await loadReferencedLocalImages(loadedContent, base, nextUploaded);
+          if (expandedContent) {
+            const extras = await loadReferencedLocalImages(expandedContent, base, nextUploaded);
             if (extras.length > 0) nextUploaded = [...nextUploaded, ...extras];
           }
           setUploadedFiles(nextUploaded);
@@ -1320,7 +1381,8 @@ export default function App() {
           if (loadedContent) {
             setContentText(loadedContent);
             setContentPath(loadedContentName);
-            setCompiledHtmlContent(loadedContent);
+            setExpandedContentText(expandedContent);
+            setCompiledHtmlContent(expandedContent);
             await loadExternalStyles(loadedContent, base);
           }
           // Honor project YAML flags: `cover:` toggles the mdwp cover page,
@@ -1375,7 +1437,7 @@ export default function App() {
     let stableTicks = 0;
     while (Date.now() - started < maxWait) {
       const currentPageCount = pageCountRef.current;
-      const isRecalculating = Boolean((window as any).__wpRecalculating);
+      const isRecalculating = Boolean((window as any).__wpRecalculating) || Boolean(window.__wpTocEnginePending);
       const pageBodies = document.querySelectorAll('.wp-document-body');
       const hasRenderedBody = Array.from(pageBodies).some((b) => (b.textContent || '').trim().length > 0);
       const hiddenMeasure = document.querySelector('.wp-document-content');
@@ -1395,13 +1457,14 @@ export default function App() {
       await new Promise((r) => setTimeout(r, 400));
     }
 
+    await waitForPreviewPagination();
     await new Promise((r) => setTimeout(r, 800));
 
     // Mermaid SVGs are inserted into the visible paginated pages by the preview
     // renderer after pagination. Wait for that render before serializing so the
     // standalone HTML contains diagrams rather than their source text.
     if (document.querySelector('.wp-document-content .mermaid')) {
-      const mermaidDeadline = Date.now() + 10000;
+      const mermaidDeadline = Date.now() + 20000;
       while (!(window as any).mermaid && Date.now() < mermaidDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
@@ -1409,9 +1472,26 @@ export default function App() {
       if (mermaid) {
         try {
           mermaid.initialize({ startOnLoad: false, theme: 'default' });
-          await mermaid.run({ querySelector: '.wp-document-content .mermaid:not([data-processed])' });
         } catch (e) {
-          console.error('Mermaid export render error:', e);
+          console.error('Mermaid init error:', e);
+        }
+        // mermaid.run() resuelve de forma asíncrona y puede terminar antes de que
+        // todos los diagramas queden convertidos; iterar hasta que no queden
+        // bloques sin data-processed o se agote el tiempo.
+        const renderDeadline = Date.now() + 20000;
+        while (Date.now() < renderDeadline) {
+          const pending = document.querySelector('.wp-document-content .mermaid:not([data-processed])');
+          if (!pending) break;
+          try {
+            await mermaid.run({
+              querySelector: '.wp-document-content .mermaid:not([data-processed])',
+              suppressErrors: true,
+            });
+          } catch (e) {
+            console.error('Mermaid export render error:', e);
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 150));
         }
       }
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -1538,6 +1618,7 @@ export default function App() {
   const buildTitleRef = useRef<string | null>(null);
 
   const captureStandaloneHtml = async (): Promise<string | null> => {
+    await waitForPreviewPagination();
     const currentCover = coverRef.current || cover;
     const currentSettings = settingsRef.current || settings;
     const coverEl = document.getElementById('wp-cover-page');
@@ -2163,7 +2244,8 @@ export default function App() {
   };
 
   // HIGH-FIDELITY SELF-CONTAINED ZIP EXPORTER
-  const handleExport = (type: 'project' | 'html' | 'pdf_generator' = 'project') => {
+  const handleExport = async (type: 'project' | 'html' | 'pdf_generator' = 'project') => {
+    await waitForPreviewPagination();
     const BASE_TOC_CSS = `
 /* Table of Contents base layout styles */
 .toc-container {
@@ -2854,7 +2936,6 @@ export default function App() {
     ${sanitizeCSS(settings.blockStyleHeader || '')}
     ${sanitizeCSS(settings.blockStyleFooter || '')}
     ${sanitizeCSS(settings.blockStylePageNum || '')}
-    ${sanitizeCSS(settings.blockStyleTOC || '')}
     ${sanitizeCSS(settings.blockStyleLists || DEFAULT_BLOCK_LISTS)}
     ${sanitizeCSS(settings.tableCustomCss || '')}
     ${sanitizeCSS(settings.customAddedCss || '')}

@@ -20,7 +20,6 @@ export const STYLES_SECTIONS: StylesSectionDef[] = [
   { key: 'encabezado', field: 'blockStyleHeader', label: 'Encabezado' },
   { key: 'pie', field: 'blockStyleFooter', label: 'Pie de página' },
   { key: 'numeracion', field: 'blockStylePageNum', label: 'Numeración de página' },
-  { key: 'toc', field: 'blockStyleTOC', label: 'Tabla de contenidos' },
   { key: 'listas', field: 'blockStyleLists', label: 'Listas' },
   { key: 'tablas', field: 'tableCustomCss', label: 'Tablas' },
   { key: 'css-adicional', field: 'customAddedCss', label: 'CSS adicional' },

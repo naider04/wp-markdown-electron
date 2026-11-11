@@ -183,9 +183,15 @@ export function ProjectPanel({
             {es ? '¿Qué guarda?' : 'What gets saved?'}
           </span>
           {es ? (
-            <p>Cada vez que pulses Guardar se escribe <code className="text-sky-300">.mdwp/configuracion_metadatos.json</code> y la bibliografía en la carpeta del proyecto. El archivo <code className="text-sky-300">contenido_fuente.md</code> se edita externamente y no se toca.</p>
+            <>
+              <p>Cada vez que pulses Guardar se escribe <code className="text-sky-300">.mdwp/configuracion_metadatos.json</code> y la bibliografía en la carpeta del proyecto. El archivo <code className="text-sky-300">contenido_fuente.md</code> se edita externamente y no se toca.</p>
+              <p className="mt-1">Divide tu documento en secciones y únelas con <code className="text-sky-300">@include("sections/introduccion.md")</code> (como <code className="text-sky-300">\input{}</code> en LaTeX). Las rutas son relativas al archivo que las contiene.</p>
+            </>
           ) : (
-            <p>Whenever you press Save, <code className="text-sky-300">.mdwp/configuracion_metadatos.json</code> and the bibliography are written to the project folder. <code className="text-sky-300">contenido_fuente.md</code> is edited externally and is never modified.</p>
+            <>
+              <p>Whenever you press Save, <code className="text-sky-300">.mdwp/configuracion_metadatos.json</code> and the bibliography are written to the project folder. <code className="text-sky-300">contenido_fuente.md</code> is edited externally and is never modified.</p>
+              <p className="mt-1">Split your document into sections and join them with <code className="text-sky-300">@include("sections/introduction.md")</code> (like <code className="text-sky-300">\input{}</code> in LaTeX). Paths are relative to the file that contains them.</p>
+            </>
           )}
         </div>
       </div>

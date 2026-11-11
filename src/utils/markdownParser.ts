@@ -1,5 +1,6 @@
 import { Marked } from 'marked';
 import Prism from 'prismjs';
+import { resolveCoverVariables } from './coverVariables';
 
 // Import Prism language components
 import 'prismjs/components/prism-css';
@@ -236,7 +237,11 @@ const customRenderers = {
     },
     heading(token: any): string {
       const level = token.depth;
-      let text = token.text || '';
+      const tokens = token.tokens || [];
+      const plain = token.text || '';
+      const inline = tokens.length && (this as any).parser
+        ? (this as any).parser.parseInline(tokens)
+        : plain;
       
       // Access current WP settings globally
       const settings = (typeof window !== 'undefined' && ((window as any).currentWpSettings || (window as any).currentUnemiSettings)) || {};
@@ -245,26 +250,18 @@ const customRenderers = {
       const lineBreak = settings[configKey] !== undefined ? !!settings[configKey] : defaultLineBreak;
       
       if (lineBreak) {
-        return `<h${level} class="apa-heading apa-level${level}">${text}</h${level}>`;
+        return `<h${level} class="apa-heading apa-level${level}">${inline}</h${level}>`;
       } else {
         // Run-in heading
-        if (text && !/[.!?:]\s*$/.test(text)) {
-          text += '.';
+        let innerHTML = inline;
+        if (plain && !/[.!?:]\s*$/.test(plain)) {
+          innerHTML += '.';
         }
         
-        let innerHTML = text;
-        if (level === 1) {
-          innerHTML = `<strong>${text}</strong>`;
-        } else if (level === 2) {
-          innerHTML = `<strong>${text}</strong>`;
-        } else if (level === 3) {
-          innerHTML = `<strong><em>${text}</em></strong>`;
-        } else if (level === 4) {
-          innerHTML = `<strong>${text}</strong>`;
-        } else if (level === 5) {
-          innerHTML = `<strong><em>${text}</em></strong>`;
+        if (level === 3 || level === 5) {
+          innerHTML = `<strong><em>${innerHTML}</em></strong>`;
         } else {
-          innerHTML = `<strong>${text}</strong>`;
+          innerHTML = `<strong>${innerHTML}</strong>`;
         }
         
         return `<span class="apa-runin apa-level${level}">${innerHTML}</span>`;
@@ -288,7 +285,7 @@ export function extractCoverCss(tmpl: string): string {
 }
 
 export function compileCoverHtml(cssOrTemplate: string, markdown: string): string {
-  const compiledMarkdown = String(coverParser.parse(markdown || ''));
+  const compiledMarkdown = String(coverParser.parse(resolveCoverVariables(markdown || '')));
   const raw = (cssOrTemplate || '').trim();
 
   if (raw.includes('{{content}}')) {

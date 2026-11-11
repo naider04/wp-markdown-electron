@@ -26,6 +26,14 @@ const TOC_ENGINE_NAME = 'toc-engine.cjs';
 const DOCX_REFERENCE_SRC =
   process.env.WP_DOCX_REFERENCE || path.join(ROOT, 'public', 'unemi-tmp.docx');
 const DOCX_REFERENCE_NAME = 'unemi-tmp.docx';
+// APA 7 citation style shipped with the app and copied into every new project
+// so Quarto/Pandoc formats in-text citations and references in APA 7.
+const CSL_SRC = process.env.WP_CSL || path.join(ROOT, 'public', 'apa.csl');
+const CSL_NAME = 'apa.csl';
+
+// Shared with Electron's main process: exposes the project TOC engine
+// (declared metrics + a measurable sample) to the renderer.
+const { loadTocEngineInfo } = require('./toc-engine-info.cjs');
 
 function usage() {
   console.log(
@@ -100,6 +108,18 @@ function startServer(project) {
       return;
     }
 
+    if (req.method === 'GET' && url === '/__toc-engine') {
+      let payload;
+      try {
+        payload = loadTocEngineInfo(project);
+      } catch (e) {
+        payload = { available: false, metrics: null, sampleHtml: null, error: String((e && e.message) || e) };
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(payload));
+      return;
+    }
+
     if (url === '/' ) {
       const idx = path.join(DIST, 'index.html');
       if (fs.existsSync(idx)) {
@@ -135,8 +155,10 @@ function startServer(project) {
       return;
     }
 
-    // Project folder file
-    const rel2 = url === '/' ? '' : url.slice(1);
+    // Project folder file. URL-decode so encoded paths (e.g. spaces as %20)
+    // resolve to the real filenames on disk.
+    let rel2 = url === '/' ? '' : url.slice(1);
+    try { rel2 = decodeURIComponent(rel2); } catch (e) { /* keep raw path */ }
     const file2 = path.join(project, rel2);
     if (fs.existsSync(file2) && fs.statSync(file2).isFile()) {
       res.writeHead(200, { 'Content-Type': mime(file2) });
@@ -234,6 +256,9 @@ async function renderCompile(basename, project, mode) {
   // name so existing .md projects keep their previous behaviour.
   const docTitle = (readYamlTitle(project) || folderName || '').trim();
   const appUrl = `${base}/app/?mode=${mode}&server=${base}${docTitle ? `&title=${encodeURIComponent(docTitle)}` : ''}`;
+  const outPath = path.join(project, OUT_NAME);
+  let baseStat = 0;
+  try { baseStat = fs.statSync(outPath).mtimeMs; } catch (e) { baseStat = 0; }
   console.log(`  → Cargando motor de compilación (${mode})…`);
   await page.goto(appUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
@@ -242,11 +267,8 @@ async function renderCompile(basename, project, mode) {
   // from a previous build would make us return immediately with stale output.
   // Instead we wait for the renderer's __wpCompileDone signal (fired after it
   // POSTs), or for the output file to be freshly rewritten by THIS build.
-  const outPath = path.join(project, OUT_NAME);
   const deadline = Date.now() + 120000;
   let lastLog = 0;
-  let baseStat = 0;
-  try { baseStat = fs.statSync(outPath).mtimeMs; } catch (e) { baseStat = 0; }
   while (!done && Date.now() < deadline) {
     // Fresh output = the file exists AND was written after this build started.
     let fresh = false;
@@ -262,8 +284,8 @@ async function renderCompile(basename, project, mode) {
 
   await new Promise((r) => setTimeout(r, 800));
 
-  if (!fs.existsSync(outPath)) {
-    console.error('Tiempo de espera agotado: no se generó el documento.');
+  if (!done || !fs.existsSync(outPath) || fs.statSync(outPath).mtimeMs <= baseStat) {
+    console.error('La compilación no generó un documento nuevo; no se reutilizará el HTML anterior.');
     await browser.close();
     server.close();
     process.exit(1);
@@ -479,39 +501,6 @@ const DEFAULT_BLOCK_PAGENUM = `/* Estilo de la Numeración de Página APA 7 */
   font-size: 11px;
 }`;
 
-const DEFAULT_BLOCK_TOC = `.toc-header {
-  font-family: "Times New Roman", Times, serif;
-  font-size: 16px;
-  font-weight: bold;
-  text-align: center;
-  margin-bottom: 24px;
-}
-.toc-item {
-  font-family: "Times New Roman", Times, serif;
-  font-size: 16px;
-  line-height: 2;
-  margin-bottom: 12px;
-}
-.toc-level-1 {
-  padding-left: 0px;
-  font-weight: bold;
-}
-.toc-level-2 {
-  padding-left: 24px;
-}
-.toc-level-3 {
-  padding-left: 48px;
-  font-style: italic;
-}
-.toc-dots {
-  border-bottom: 1px dotted black;
-  margin: 0 8px;
-}
-.toc-page {
-  font-weight: bold;
-  font-size: 16px;
-}`;
-
 const DEFAULT_TOC_JSON = {
   title: 'Tabla de Contenidos',
   pages: [],
@@ -535,16 +524,16 @@ function renderTOC(data) {
       const level = Math.max(1, Math.min(6, Number(entry.level) || 1));
       return '<div class="toc-engine-entry toc-level-' + level + '">' +
         '<span class="toc-engine-title">' + escapeHtml(entry.title) + '</span>' +
-        '<span class="toc-engine-leader" aria-hidden="true"></span>' +
+        '<span class="toc-dots" aria-hidden="true"></span>' +
         '<span class="toc-engine-page-number">' + escapeHtml(entry.page) + '</span>' +
       '</div>';
     }).join('') || '<p class="toc-engine-empty">No headings were selected for the table of contents.</p>';
     return '<style>' +
-      '.toc-engine-page{font-family:"Times New Roman",Times,serif;font-size:16px;}' +
+      '.toc-engine-page{font-family:"Times New Roman",Times,serif;font-size:16px;line-height:1;}' +
       '.toc-engine-header{margin:0 0 24px;font-size:16px;font-weight:bold;text-align:center;}' +
-      '.toc-engine-entry{display:flex;align-items:baseline;gap:8px;line-height:2;margin:0 0 8px;}' +
+      '.toc-engine-entry{display:flex;align-items:baseline;gap:8px;line-height:1.5;margin:0 0 8px;}' +
       '.toc-engine-title{flex:0 1 auto;}' +
-      '.toc-engine-leader{flex:1 1 auto;border-bottom:1px dotted #222!important;min-width:12px;}' +
+      '.toc-dots{flex:1 1 auto;border-bottom:1px dotted #222!important;min-width:12px;}' +
       '.toc-engine-empty{color:#667085;font-style:italic;text-align:center;}' +
       '.toc-engine-page-number{font-weight:bold;}' +
       '.toc-level-1{font-weight:bold;}' +
@@ -560,6 +549,13 @@ function renderTOC(data) {
   });
 }
 
+// Heights in CSS pixels, including bottom margins. Keep these in sync with
+// the CSS above, or omit metrics to let the renderer measure a sample instead.
+renderTOC.metrics = {
+  headerHeight: 40,
+  entryHeight: 32,
+};
+
 module.exports = renderTOC;
 `;
 
@@ -567,6 +563,19 @@ const DEFAULT_BLOCK_TABLE = `.wp-document-content table,
 .wp-document-content table th,
 .wp-document-content table td {
   border: 1px solid #000000 !important;
+}
+
+.wp-document-content table th,
+.wp-document-content table td {
+  padding: 6px 8px !important;
+  text-align: left !important;
+  vertical-align: top;
+}
+
+.wp-document-content table th p,
+.wp-document-content table td p {
+  text-align: left !important;
+  text-indent: 0 !important;
 }`;
 
 const DEFAULT_BLOCK_LISTS = `/* Estilo de Listas Académicas */
@@ -612,7 +621,6 @@ const STYLES_SECTIONS = [
   { key: 'encabezado', field: 'blockStyleHeader' },
   { key: 'pie', field: 'blockStyleFooter' },
   { key: 'numeracion', field: 'blockStylePageNum' },
-  { key: 'toc', field: 'blockStyleTOC' },
   { key: 'listas', field: 'blockStyleLists' },
   { key: 'tablas', field: 'tableCustomCss' },
   { key: 'css-adicional', field: 'customAddedCss' },
@@ -722,38 +730,39 @@ const DEFAULT_OVERLAY_TEMPLATE = `body{
 .cv-content h1 {
     font-size:24px;
     font-weight:bold;
-    line-height:1.4;
+    line-height:1.2;
     text-transform:uppercase;
     margin-top:0;
-    margin-bottom:18px;
+    margin-bottom:8px;
     color:#002E45;
 }
 
 .cv-content h2 {
     font-size:20px;
     font-weight:bold;
-    margin-top:10px;
-    margin-bottom:2px;
+    line-height:1.2;
+    margin-top:6px;
+    margin-bottom:0;
     color:#002E45;
     text-transform:uppercase;
 }
 
 .cv-content p {
-    margin:1px 0 10px 0;
+    margin:0 0 4px 0;
     font-size:18px;
-    line-height:1.5;
+    line-height:1.2;
     color:#002E45;
 }
 
 .cv-content ul {
     list-style: none;
     padding: 0;
-    margin: 1px 0 10px 0;
+    margin: 0 0 4px 0;
 }
 
 .cv-content li {
     font-size: 18px;
-    line-height: 1.5;
+    line-height: 1.2;
     color: #002E45;
 }`;
 
@@ -777,7 +786,7 @@ Arquitectura de Computador
 Ing. Bermeo Paucar Javier, Mgti
 
 ## FECHA:
-Junio 18, 2026
+[FECHA]
 
 ## PERIODO:
 Abril 2026 - Julio 2026
@@ -825,7 +834,6 @@ function defaultSettings() {
     blockStyleHeader: DEFAULT_BLOCK_HEADER,
     blockStyleFooter: DEFAULT_BLOCK_FOOTER,
     blockStylePageNum: DEFAULT_BLOCK_PAGENUM,
-    blockStyleTOC: DEFAULT_BLOCK_TOC,
     blockStyleLists: DEFAULT_BLOCK_LISTS,
     tableCustomCss: DEFAULT_BLOCK_TABLE,
     pageNumTemplate: 'Página {page} de {total}',
@@ -908,6 +916,13 @@ function writeProject(target, base, opts = {}) {
     fs.copyFileSync(DOCX_REFERENCE_SRC, path.join(dataDir, docxName));
   }
 
+  // Copy the APA 7 CSL style referenced from the YAML so citations and the
+  // reference list use APA 7 (no quotes around article titles, etc.).
+  const cslCopied = fs.existsSync(CSL_SRC);
+  if (cslCopied) {
+    fs.copyFileSync(CSL_SRC, path.join(target, CSL_NAME));
+  }
+
   // Optional downloaded attachment (e.g. the assignment PDF). Copied into the
   // project so it stays available, and registered as an uploaded resource.
   if (opts.attachment && opts.attachment.path && fs.existsSync(opts.attachment.path)) {
@@ -932,10 +947,18 @@ function writeProject(target, base, opts = {}) {
   const contentTitle = opts.title || base;
   const contentPath = path.join(target, CONTENT_NAME);
   const escapedTitle = String(contentTitle).replace(/"/g, '\\"');
-  const contentBody =
+  let contentBody =
     opts.body !== undefined
       ? String(opts.body).replace(/\s+$/, '') + '\n'
       : `# ${base}\n\nEscribe aquí el contenido de tu documento.\n`;
+  // APA 7: the reference list closes the document. `[PAGEBREAK]` starts the
+  // bibliography on a new page and `[BIBLIOGRAPHY]` marks where citeproc
+  // places the reference list.
+  if (!/#\s*Bibliograf[ií]a/i.test(contentBody) && !/\[BIBLIOGRAPHY\]/i.test(contentBody)) {
+    contentBody =
+      contentBody.replace(/\s+$/, '') +
+      '\n\n[PAGEBREAK]\n\n# Bibliografía\n\n[BIBLIOGRAPHY]\n';
+  }
   fs.writeFileSync(
     contentPath,
     [
@@ -947,6 +970,9 @@ function writeProject(target, base, opts = {}) {
       '  html:',
       `    css: ${STYLES_NAME}`,
       'bibliography: bibliografia.bib',
+      ...(cslCopied ? [`csl: ${CSL_NAME}`] : []),
+      'lang: es',
+      'nocite: "@*"',
       'toc: true',
       'cover: true',
       '---',
@@ -1001,10 +1027,16 @@ function writeProject(target, base, opts = {}) {
     console.log(`    • ${copiedAttachments.join(', ')} (adjunto de la tarea copiado)`);
   }
   console.log(`    • bibliografia.bib (vacío)`);
+  console.log(`    • Tip: divide el contenido con @include("sections/mi-seccion.md") en ${CONTENT_NAME} (como \\input{} de LaTeX)`);
   if (docxCopied) {
     console.log(`    • ${docxName} (docx de referencia copiado)`);
   } else {
     console.log(`  ⚠ No se copió ${docxName}: no existe en ${DOCX_REFERENCE_SRC}`);
+  }
+  if (cslCopied) {
+    console.log(`    • ${CSL_NAME} (estilo APA 7 copiado y referenciado en el YAML)`);
+  } else {
+    console.log(`  ⚠ No se copió ${CSL_NAME}: no existe en ${CSL_SRC}`);
   }
   console.log(`\n  Abre con: mdwp open ${target}`);
 }
