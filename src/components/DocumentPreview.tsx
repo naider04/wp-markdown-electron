@@ -11,7 +11,7 @@ import { mathmlToOmml } from '../lib/ommlConverter';
 import { CoverConfig, PageSettings, UploadedFile, HTMLBlock, BibliographyItem } from '../types';
 import CoverPage from './CoverPage';
 import PageTemplate from './PageTemplate';
-import { getAPACitationLabel, formatAPABibliographyItem, extractAPAYear, assignYearSuffixes, formatLocator } from '../utils/apaFormatter';
+import { getAPACitationLabel, formatAPABibliographyItem, extractAPAYear, assignYearSuffixes, formatLocator, cleanBraces } from '../utils/apaFormatter';
 import { formatFontSize } from '../utils/fontUtils';
 import { useLanguage } from '../i18n/LanguageContext';
 import { FileText, Layers, RefreshCw, ZoomIn, ZoomOut, FolderArchive, Maximize2, Minimize2, Copy, Check, ExternalLink, Eye, EyeOff, AlertCircle, Monitor, Play, RotateCcw } from 'lucide-react';
@@ -1258,7 +1258,12 @@ export default function DocumentPreview({
         bibItemsToShow = bibItemsToShow.filter(b => citedKeys.has(b.key.toLowerCase()));
       }
 
-      const sortedBib = bibItemsToShow.sort((a, b) => a.authors.localeCompare(b.authors));
+      const sortedBib = bibItemsToShow.sort((a, b) => {
+        // Sort by the visible author text: BibTeX brace protection such as
+        // {{Corporate Name}} must not affect ordering ("{" sorts before letters).
+        const byAuthor = cleanBraces(a.authors || '').localeCompare(cleanBraces(b.authors || ''), 'es', { sensitivity: 'base' });
+        return byAuthor !== 0 ? byAuthor : String(a.year || '').localeCompare(String(b.year || ''));
+      });
 
       let bibHtml = ``;
 
@@ -1355,7 +1360,12 @@ export default function DocumentPreview({
         bibItemsToShow = bibItemsToShow.filter(b => citedKeys.has(b.key.toLowerCase()));
       }
 
-      const sortedBib = bibItemsToShow.sort((a, b) => a.authors.localeCompare(b.authors));
+      const sortedBib = bibItemsToShow.sort((a, b) => {
+        // Sort by the visible author text: BibTeX brace protection such as
+        // {{Corporate Name}} must not affect ordering ("{" sorts before letters).
+        const byAuthor = cleanBraces(a.authors || '').localeCompare(cleanBraces(b.authors || ''), 'es', { sensitivity: 'base' });
+        return byAuthor !== 0 ? byAuthor : String(a.year || '').localeCompare(String(b.year || ''));
+      });
 
       // We append elements as flat sibling nodes so the paginator can cleanly slice them across pages!
       let bibHtml = `<div class="page-break"></div>`;

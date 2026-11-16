@@ -63,8 +63,18 @@ function projectFolder(tail) {
 }
 
 function detectChrome() {
+  const win = (envVar, rest) => (process.env[envVar] ? path.join(process.env[envVar], rest) : '');
   const candidates = [
     process.env.WP_CHROME,
+    // Windows
+    win('LOCALAPPDATA', 'Google\\Chrome\\Application\\chrome.exe'),
+    win('PROGRAMFILES', 'Google\\Chrome\\Application\\chrome.exe'),
+    win('PROGRAMFILES(X86)', 'Google\\Chrome\\Application\\chrome.exe'),
+    win('PROGRAMW6432', 'Google\\Chrome\\Application\\chrome.exe'),
+    win('LOCALAPPDATA', 'Microsoft\\Edge\\Application\\msedge.exe'),
+    win('PROGRAMFILES(X86)', 'Microsoft\\Edge\\Application\\msedge.exe'),
+    win('PROGRAMFILES', 'Microsoft\\Edge\\Application\\msedge.exe'),
+    // Linux
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
@@ -1092,9 +1102,20 @@ async function cmdNew(targetArg, opts) {
 }
 
 function cmdOpen(folder) {
-  const electronBin = path.join(ROOT, 'node_modules', '.bin', 'electron');
   console.log(`  → Abriendo editor: ${folder}`);
-  const child = spawn(electronBin, [path.join(ROOT, 'electron', 'main.cjs'), '--folder', folder], {
+  const args = [path.join(ROOT, 'electron', 'main.cjs'), '--folder', folder];
+  let electronPath;
+  try {
+    electronPath = require('electron');
+    // On Windows, require('electron') returns the path to electron.exe
+  } catch (e) {
+    if (process.platform === 'win32') {
+      electronPath = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
+    } else {
+      electronPath = path.join(ROOT, 'node_modules', '.bin', 'electron');
+    }
+  }
+  const child = spawn(electronPath, args, {
     cwd: ROOT,
     stdio: 'inherit',
   });

@@ -31,6 +31,10 @@ export function isInstitutional(authorStr: string): boolean {
   const hasKeyword = institutionalKeywords.some(keyword => clean.includes(keyword));
   if (hasKeyword) return true;
 
+  // Corporate suffixes (e.g. "GitHub, Inc.") mark a corporate author even
+  // though the name contains a comma.
+  if (/\b(inc|ltd|llc|corp|gmbh)\b/i.test(clean)) return true;
+
   if (clean.includes(',')) {
     return false; // Structured as Lastname, Firstname
   }
